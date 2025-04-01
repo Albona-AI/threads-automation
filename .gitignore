@@ -1,0 +1,24 @@
+# 環境変数・機密情報
+.env
+.env.*
+*_cookies.json
+login_page.png
+*.key
+credentials.json
+
+# Python関連
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+venv/
+ENV/
+
+# システムファイル
+.DS_Store
+Thumbs.db
+
+# データファイル（必要に応じてコメントアウト）
+*.csv
+*.json

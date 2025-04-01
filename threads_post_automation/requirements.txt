@@ -1,0 +1,8 @@
+selenium==4.15.2
+webdriver-manager==4.0.1
+# 指定バージョンを削除して最新互換バージョンを使う
+pandas
+requests==2.31.0
+python-dotenv==1.0.0
+openai
+tqdm==4.66.1 
