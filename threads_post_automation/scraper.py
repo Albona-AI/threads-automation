@@ -803,16 +803,20 @@ class ThreadsScraper:
         
         return new_posts
 
-    def extract_posts(self, max_posts=100, exclude_image_posts=True):
+    def extract_posts(self, max_posts=30, exclude_image_posts=True):
         """
-        投稿を抽出する関数（大幅改良版）
+        タイムラインから投稿を抽出するメソッド
+        
+        Args:
+            max_posts (int): 取得する最大投稿数
+            exclude_image_posts (bool): 画像を含む投稿を除外するかどうか
+            
+        Returns:
+            list: (ユーザー名, 投稿テキスト, いいね数)のタプルのリスト
         """
         posts = []
-        processed_post_ids = set()
-        retry_count = 0
-        max_retries = 20  # より多くの再試行を許可
-        no_new_posts_count = 0
-        max_no_new_posts = 5
+        attempt_count = 0
+        max_attempts = 10
         
         try:
             # ページ読み込み完了を確認
@@ -875,12 +879,12 @@ class ThreadsScraper:
             # オリジナルのHTMLでの投稿コンテナ特定のためのXPath
             container_xpath = "//div[contains(@class, 'x1ypdohk') and contains(@class, 'x1n2onr6') and contains(@class, 'xvuun6i')]"
             
-            while len(posts) < max_posts and retry_count < max_retries:
+            while len(posts) < max_posts and attempt_count < max_attempts:
                 # 現在の投稿数をログに記録
-                logger.info(f"Current post count: {len(posts)}/{max_posts}, Retry: {retry_count+1}/{max_retries}")
+                logger.info(f"Current post count: {len(posts)}/{max_posts}, Attempt: {attempt_count+1}/{max_attempts}")
                 
                 # 一定回数試行してもうまくいかない場合は、別のスクロール方法を試す
-                if retry_count % 4 == 0:
+                if attempt_count % 4 == 0:
                     logger.info("Using progressive scroll technique...")
                     new_posts_added = self._progressive_scroll(8)  # 段階的スクロールを実行
                     if new_posts_added == 0:
@@ -892,13 +896,12 @@ class ThreadsScraper:
                         self._human_like_delay(5.0, 7.0)
                 
                 # 一定間隔でページを更新
-                if no_new_posts_count >= 3 and retry_count % 3 == 0:
+                if attempt_count >= 3 and attempt_count % 3 == 0:
                     logger.info("Refreshing page to get new content...")
                     current_url = self.driver.current_url
                     self.driver.get(current_url)
                     self._human_like_delay(5.0, 8.0)
                     self._wait_for_content_load(10)
-                    processed_post_ids.clear()  # 処理済み投稿IDをリセット
                 
                 posts_found_this_round = False
                 
@@ -924,20 +927,29 @@ class ThreadsScraper:
                                     
                                     processed_post_ids.add(container_id)
                                     
-                                    # 画像の存在をチェック（exclude_image_posts がTrueの場合）
-                                    if exclude_image_posts:
-                                        try:
-                                            # img要素を探す
-                                            images = container.find_elements(By.TAG_NAME, "img")
-                                            # 投稿内の画像数をカウント（プロフィール画像は除外）
-                                            post_images = [img for img in images if not any(attr in (img.get_attribute("alt") or "").lower() for attr in ["profile", "プロフィール", "アバター", "avatar"])]
-                                            
-                                            # 画像が含まれている場合はスキップ
-                                            if len(post_images) > 1:  # 1つ目はプロフィール画像かもしれないので、2枚以上ある場合
-                                                logger.info("Post contains images, skipping...")
-                                                continue
-                                        except Exception as e:
-                                            logger.warning(f"Error checking for images: {e}")
+                                    # 画像付き投稿の検出 (新規追加)
+                                    has_image = False
+                                    try:
+                                        # 方法1: mediaリンクを検索
+                                        media_links = container.find_elements(By.CSS_SELECTOR, "a[href*='/media']")
+                                        
+                                        # 方法2: 画像要素を検索 (プロフィール写真を除外)
+                                        images = container.find_elements(By.CSS_SELECTOR, "img:not([alt*='Profile photo'])")
+                                        
+                                        # 方法3: picture要素を検索
+                                        pictures = container.find_elements(By.TAG_NAME, "picture")
+                                        
+                                        # いずれかの方法で画像を検出した場合
+                                        if media_links or images or pictures:
+                                            has_image = True
+                                            logger.info(f"画像付き投稿を検出: ユーザー「{username}」")
+                                    except Exception as e:
+                                        logger.warning(f"画像検出中にエラー: {e}")
+                                    
+                                    # exclude_image_posts=Trueで、かつ画像付き投稿の場合はスキップ
+                                    if exclude_image_posts and has_image:
+                                        logger.info(f"画像付き投稿をスキップ: ユーザー「{username}」")
+                                        continue
                                     
                                     # 1. ユーザー名を抽出
                                     username = None
@@ -1049,7 +1061,7 @@ class ThreadsScraper:
             
             # 抽出ループ内でページの再読み込みを追加
             # 適切な場所に以下のコードを追加
-            if no_new_posts_count >= 3 and retry_count % 5 == 0:
+            if attempt_count >= 3 and attempt_count % 5 == 0:
                 logger.info("Refresh page to get new content...")
                 current_url = self.driver.current_url
                 self.driver.get(current_url)
