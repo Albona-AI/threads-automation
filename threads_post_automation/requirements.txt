@@ -1,8 +1,18 @@
+# ウェブスクレイピング基本パッケージ
 selenium==4.15.2
 webdriver-manager==4.0.1
-# 指定バージョンを削除して最新互換バージョンを使う
-pandas
+
+# データ処理
+pandas==2.1.3
+
+# ネットワークとデータ取得
 requests==2.31.0
+
+# 設定と環境変数
 python-dotenv==1.0.0
-openai
-tqdm==4.66.1 
+
+# AI/OpenAI関連（オプション）
+openai==1.13.3
+
+# ユーティリティ
+tqdm==4.66.1
