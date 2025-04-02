@@ -19,6 +19,7 @@ import pandas as pd
 import logging
 import sys
 from dotenv import load_dotenv  # python-dotenv パッケージが必要です
+import urllib.parse
 
 # ロギングの設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -216,33 +217,25 @@ class ThreadsScraper:
         
         return new_content_loaded
     
-    def _wait_for_content_load(self, timeout=8):  # タイムアウトを延長
+    def _wait_for_content_load(self, timeout=10):
         """
-        コンテンツが読み込まれるのを待つ
+        コンテンツ読み込みを待機するヘルパーメソッド
         
         Args:
             timeout (int): 最大待機時間（秒）
             
         Returns:
-            bool: 読み込みが完了したかどうか
+            bool: コンテンツが読み込まれたかどうか
         """
         try:
-            # document.readyStateを確認
+            # 何らかのコンテンツ要素が表示されるのを待つ
             WebDriverWait(self.driver, timeout).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
+                EC.presence_of_element_located((By.TAG_NAME, "article"))
             )
-            
-            # スピナーや読み込み中の要素を検出（Threadsの場合）
-            loading_elements = self.driver.find_elements(By.CSS_SELECTOR, "div[role='progressbar']")
-            if loading_elements:
-                # 読み込み中要素が消えるのを待つ
-                WebDriverWait(self.driver, timeout).until_not(
-                    lambda d: d.find_elements(By.CSS_SELECTOR, "div[role='progressbar']")
-                )
-            
+            logger.info("コンテンツが読み込まれました")
             return True
-        except:
-            logger.warning(f"Content load wait timed out after {timeout} seconds")
+        except Exception as e:
+            logger.warning(f"コンテンツ読み込み待機中にタイムアウトまたはエラー: {e}")
             return False
     
     def _safe_click(self, element):
@@ -684,73 +677,52 @@ class ThreadsScraper:
     
     def _force_scroll_to_bottom(self):
         """
-        強制的に画面の最下部までスクロールする
-        
-        Returns:
-            bool: スクロールが成功したかどうか
+        ページの最下部まで強制的にスクロールするメソッド
         """
         try:
-            # 現在の高さを取得
-            current_height = self.driver.execute_script("return window.innerHeight")
-            page_height = self.driver.execute_script("return document.body.scrollHeight")
-            logger.info(f"Current view height: {current_height}, Total page height: {page_height}")
-            
-            # ページの最下部まで強制的にスクロール
+            # JavaScriptを使用してページの最下部までスクロール
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            logger.info("Forced scroll to bottom of page")
+            logger.info("ページの最下部まで強制スクロール実行")
             
-            # スクロール後の適切な待機
-            self._human_like_delay(3.0, 5.0)
+            # 少し待機して読み込みを待つ
+            time.sleep(3)
             
-            # スクロール後の高さを確認
-            new_page_height = self.driver.execute_script("return document.body.scrollHeight")
-            logger.info(f"After forced scroll - Page height: {new_page_height}")
-            
-            # スクロールが成功したかどうかを返す
-            return new_page_height > page_height
-            
+            return True
         except Exception as e:
-            logger.error(f"Error during force scroll: {e}")
+            logger.warning(f"強制スクロール中にエラー: {e}")
             return False
 
     def _check_end_of_feed(self):
         """
-        フィードの終わりに達したかどうかを確認する
+        フィードの終わりに達したかどうかをチェックするメソッド
         
         Returns:
-            bool: フィードの終わりに達した場合はTrue
+            bool: フィードの終わりに達したかどうか
         """
-        # 「これ以上の投稿はありません」などのメッセージを検出
-        end_messages = [
-            "これ以上の投稿はありません", 
-            "No more posts", 
-            "End of feed",
-            "すべての投稿を見ました"
-        ]
-        
-        page_source = self.driver.page_source.lower()
-        for message in end_messages:
-            if message.lower() in page_source:
-                logger.info(f"End of feed detected: '{message}'")
-                return True
-        
-        # 特定のセレクタで終わりを示す要素を検出
-        end_selectors = [
-            "div[role='button'][aria-label*='refresh']",
-            "div.x1lliihq",  # Threadsの「終わり」を示す可能性のあるクラス
-            "svg[aria-label*='refresh']"
-        ]
-        
-        for selector in end_selectors:
-            try:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+        try:
+            # フィードの終わりを示す要素を探す (「これ以上の投稿はありません」などのテキスト)
+            end_texts = ["これ以上の投稿はありません", "No more posts", "End of feed"]
+            
+            for text in end_texts:
+                # シングルクォートを含まない安全なXPath式を使用
+                elements = self.driver.find_elements(By.XPATH, f"//*[contains(text(), \"{text}\")]")
                 if elements:
-                    logger.info(f"End indicator found with selector: {selector}")
+                    logger.info(f"フィードの終わりを検出: '{text}'")
                     return True
-            except:
-                continue
-        
-        return False
+            
+            # 別の方法で終了チェック: 特定の要素の有無
+            try:
+                end_elements = self.driver.find_elements(By.CSS_SELECTOR, "div.x1n2onr6[role='button'][tabindex='0']")
+                if len(end_elements) > 0 and "end" in end_elements[0].get_attribute("aria-label").lower():
+                    logger.info("フィード終了要素を検出")
+                    return True
+            except Exception:
+                pass
+                
+            return False
+        except Exception as e:
+            logger.warning(f"フィード終了チェック中にエラー: {e}")
+            return False
 
     def _progressive_scroll(self, total_scrolls=10):
         """
@@ -918,14 +890,16 @@ class ThreadsScraper:
                                     # 投稿の一意のIDを生成（位置情報と内部テキストのハッシュ）
                                     try:
                                         container_id = hash(container.text[:50] + str(container.location))
-                                    except:
+                                    except Exception as e:
+                                        logger.warning(f"投稿IDの生成に失敗: {e}")
                                         container_id = hash(str(container.location))
                                     
                                     # 既に処理済みの投稿はスキップ
-                                    if container_id in processed_post_ids:
+                                    post_ids = set()  # 一時的なIDセット
+                                    if container_id in post_ids:
                                         continue
                                     
-                                    processed_post_ids.add(container_id)
+                                    post_ids.add(container_id)
                                     
                                     # 画像付き投稿の検出 (新規追加)
                                     has_image = False
@@ -1214,6 +1188,540 @@ class ThreadsScraper:
             logger.warning(f"Page load wait timed out or failed: {e}")
             return False
 
+    def extract_posts_from_search(self, keyword, max_posts=100, exclude_image_posts=True, min_likes=0, target=None, debug_mode=False):
+        """
+        検索結果ページから投稿を抽出する
+        
+        Args:
+            keyword (str): 検索キーワード
+            max_posts (int): 取得する最大投稿数
+            exclude_image_posts (bool): 画像付き投稿を除外するかどうか
+            min_likes (int): 最小いいね数（これ未満の投稿は除外）
+            target (str): ターゲット名（記録用）
+            debug_mode (bool): デバッグモード（Trueの場合、画像判定を無視してすべての投稿を取得）
+        
+        Returns:
+            list: 抽出された投稿のリスト
+        """
+        posts = []
+        local_post_ids = set()  # 重複排除用のローカルセット
+        
+        try:
+            # 検索ページへの移動
+            if not self.navigate_to_search_page(keyword):
+                logger.error(f"検索ページへの移動に失敗: {keyword}")
+                return posts
+                
+            # ページロード待機
+            self._wait_for_page_load(10)
+            
+            # 最下部スクロールを10回実行（新しい機能を使用）
+            self._scroll_to_bottom(count=10)
+            
+            # 投稿コンテナの取得
+            containers = self._get_post_elements()
+            logger.info(f"{len(containers)}個の投稿コンテナを検出")
+            
+            # 各投稿を処理
+            for i, container in enumerate(containers):
+                try:
+                    # デバッグモードの場合、HTMLを保存
+                    if debug_mode and i < 5:  # 最初の5件のみ保存
+                        self._save_post_html_for_debug(container, i, keyword)
+                    
+                    # ユーザー名を取得
+                    try:
+                        # 複数のセレクタを試行
+                        username_selectors = [
+                            "span.xu06os2[dir='auto']",
+                            "a[href^='/@'] span",
+                            "div.xqcrz7y a[href^='/@']"
+                        ]
+                        
+                        username = "unknown"
+                        for selector in username_selectors:
+                            try:
+                                user_element = container.find_element(By.CSS_SELECTOR, selector)
+                                username = user_element.text.strip()
+                                if username and not username.startswith("@"):
+                                    username = username.replace("@", "")
+                                if username:
+                                    break
+                            except:
+                                continue
+                        
+                        # バックアップ方法: hrefから抽出
+                        if username == "unknown":
+                            try:
+                                href_element = container.find_element(By.CSS_SELECTOR, "a[href^='/@']")
+                                href = href_element.get_attribute("href")
+                                username = href.split("/@")[1].split("/")[0]
+                            except:
+                                pass
+                    except Exception as ue:
+                        logger.warning(f"ユーザー名取得エラー: {ue}")
+                        username = "unknown"
+                    
+                    # 投稿テキストを取得
+                    post_text = self._extract_post_text(container)
+                    
+                    # 一意のIDを生成（コンテナの位置とテキストからハッシュ）
+                    try:
+                        # このライン重要: container_id を定義
+                        container_id = f"{username}:{post_text[:30]}"
+                    except Exception as ide:
+                        logger.warning(f"ID生成エラー: {ide}")
+                        container_id = f"post_{i}"
+                    
+                    # 重複チェック - これがエラーになっていた行
+                    if container_id not in local_post_ids:
+                        # 画像の有無を判定
+                        has_images = self._has_images(container)
+                        
+                        # 画像付き投稿を除外するかどうかのチェック
+                        if not exclude_image_posts or not has_images or debug_mode:
+                            # いいね数を取得
+                            likes = self._extract_likes(container)
+                            
+                            # いいね数の最小値チェック
+                            if likes >= min_likes:
+                                # 投稿を追加 - ここでターゲット情報も追加
+                                posts.append((username, post_text, likes, target))
+                                # IDを保存して重複を防止
+                                local_post_ids.add(container_id)
+                                
+                                logger.info(f"投稿を追加: {username}, いいね={likes}, 内容={post_text[:50]}...")
+                                
+                                # 最大投稿数に達したら終了
+                                if len(posts) >= max_posts:
+                                    logger.info(f"最大投稿数 {max_posts} に達したため終了")
+                                    break
+                            else:
+                                logger.info(f"いいね数が少ない投稿をスキップ: {likes} < {min_likes}")
+                        else:
+                            logger.info(f"画像付き投稿をスキップ: {container_id}")
+                    else:
+                        logger.info(f"重複投稿をスキップ: {container_id}")
+                        
+                except Exception as post_e:
+                    logger.warning(f"投稿 {i+1} の処理中にエラー: {post_e}")
+                    continue
+                    
+            logger.info(f"検索「{keyword}」から {len(posts)} 件の投稿を抽出")
+            return posts
+            
+        except Exception as e:
+            logger.error(f"検索抽出中にエラー: {e}")
+            logger.error(traceback.format_exc())
+            return posts
+
+    def save_to_csv(self, posts, filename=None, min_likes=0):
+        """
+        投稿データをCSVに保存（投稿者、投稿内容、いいね数、ターゲットを別カラムに）
+        
+        Args:
+            posts (list): (投稿者, 投稿テキスト, いいね数, ターゲット)のタプルのリスト
+            filename (str): 保存するファイル名 (Noneの場合は日時を含む名前が自動生成される)
+            min_likes (int): 保存する最小いいね数（これ以下のいいね数の投稿はフィルタリング）
+        
+        Returns:
+            str: 保存されたファイルのパス
+        """
+        try:
+            # デフォルトのファイル名を設定 (日付と時間を含む)
+            if filename is None:
+                now = datetime.datetime.now()
+                filename = f"threads_posts_{now.strftime('%m%d_%H%M')}.csv"
+            
+            # データフレームを作成する前に重複や不要データをクリーニング
+            cleaned_posts = []
+            seen_posts = set()  # 重複チェック用
+            
+            for username, post_text, likes, target in posts:
+                # 重複チェック
+                post_identifier = f"{username}:{post_text[:20]}"
+                if post_identifier in seen_posts:
+                    continue
+                
+                # 投稿者名クリーニング
+                # 数字だけのユーザー名は通常本物のユーザーではない
+                if not username or username.isdigit():  # 'おすすめ'は有効な投稿ソースにする
+                    continue
+                    
+                # 投稿テキストクリーニング
+                # 明らかに広告やスパム投稿を除外
+                spam_patterns = [
+                    "100円note", "月5万", "裏技", "副業", "スキル０", "在宅", "稼げる",
+                    "Line登録", "権利収入", "不労所得"
+                ]
+                
+                # 少なくとも一つのスパムパターンを含む場合はスキップ
+                if any(pattern in post_text for pattern in spam_patterns):
+                    continue
+                    
+                # 短すぎる投稿は除外
+                if len(post_text) < 5:
+                    continue
+                    
+                # メタデータや時間表示のみの投稿を除外
+                if post_text in [username, f"{username}_", f"@{username}"]:
+                    continue
+                    
+                # UI要素っぽいテキストを除外
+                if self._is_ui_element_text(post_text):
+                    continue
+                
+                # ユーザー名と同じ投稿テキストを除外
+                if username == post_text:
+                    continue
+                    
+                # クリーニングしたデータを追加
+                cleaned_posts.append((username, post_text, likes, target))
+                seen_posts.add(post_identifier)
+            
+            # データフレーム作成と保存
+            if cleaned_posts:
+                df = pd.DataFrame(cleaned_posts, columns=["username", "post_text", "likes", "target"])
+                
+                # 元のCSVファイルを保存
+                df.to_csv(filename, index=False, encoding='utf-8-sig')
+                logger.info(f"Saved {len(cleaned_posts)} cleaned posts to {filename}")
+                
+                # いいね数でフィルタリング
+                if min_likes > 0:
+                    filtered_df = df[df['likes'] >= min_likes]
+                    filtered_count = len(filtered_df)
+                    
+                    # いいね数による選別結果をログに記録
+                    logger.info(f"Filtered to {filtered_count} posts with {min_likes} or more likes")
+                    
+                    # フィルター後のデータを同じファイル名で上書き保存
+                    if filtered_count > 0:
+                        filtered_df.to_csv(filename, index=False, encoding='utf-8-sig')
+                        logger.info(f"Saved {filtered_count} filtered posts to {filename}")
+                        
+                        # 削除された投稿数を表示
+                        removed_count = len(df) - filtered_count
+                        logger.info(f"Removed {removed_count} posts with fewer than {min_likes} likes")
+                    else:
+                        logger.warning(f"No posts with {min_likes} or more likes found. Original file preserved.")
+                
+                return filename
+            else:
+                logger.warning("No valid posts to save after cleaning")
+                return None
+        except Exception as e:
+            logger.error(f"Error saving posts to CSV: {e}")
+            return None
+
+    def navigate_to_search_page(self, keyword):
+        """
+        検索ページに移動する
+        
+        Args:
+            keyword (str): 検索するキーワード
+            
+        Returns:
+            bool: 検索ページへの移動に成功したかどうか
+        """
+        try:
+            # URLエンコードされたキーワードを作成
+            encoded_keyword = urllib.parse.quote(keyword)
+            search_url = f"https://www.threads.net/search?q={encoded_keyword}&serp_type=default"
+            
+            logger.info(f"Navigating to search page for keyword: {keyword}")
+            self.driver.get(search_url)
+            
+            # ページの読み込みを待つ
+            self._wait_for_page_load(20)
+            
+            # 人間らしい遅延
+            self._human_like_delay(3.0, 5.0)
+            
+            # 検索結果ページかどうか確認
+            if "search" in self.driver.current_url and keyword.lower() in self.driver.page_source.lower():
+                logger.info(f"Successfully navigated to search page for: {keyword}")
+                # コンテンツが完全に読み込まれるのを待つ
+                self._wait_for_content_load(10)
+                return True
+            else:
+                logger.warning(f"Failed to navigate to search page for: {keyword}")
+                # 現在のURLをログに記録
+                logger.warning(f"Current URL: {self.driver.current_url}")
+                return False
+        except Exception as e:
+            logger.error(f"Error navigating to search page for keyword '{keyword}': {e}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def _has_images(self, element):
+        """
+        投稿要素に画像や動画が含まれているかどうかを正確に判定する
+        
+        Args:
+            element: 投稿要素
+            
+        Returns:
+            bool: 画像や動画が含まれる場合はTrue、それ以外はFalse
+        """
+        try:
+            # ボタン内のSVGやアイコン画像を除外した実際の投稿画像を検索
+            # プロフィール写真とボタンアイコンを除外 (日本語と英語の両方に対応)
+            images = element.find_elements(By.CSS_SELECTOR, 
+                "img:not([alt*='Profile photo']):not([alt*='プロフィール写真']):not([alt='「いいね！」']):not([alt='いいね！']):not([alt='返信']):not([alt='Reply']):not([alt='再投稿']):not([alt='Repost']):not([alt='シェアする']):not([alt='Share'])")
+            
+            # インタラクティブなメディア要素（動画など）を検索
+            media_containers = element.find_elements(By.CSS_SELECTOR, 
+                "div[role='button'][tabindex='0'][aria-label*='投稿'], div[role='button'][tabindex='0'][aria-label*='post']")
+            
+            # 画像スタイルを持つ特定の親コンテナを検索（画像の別のパターン）
+            image_containers = element.find_elements(By.CSS_SELECTOR, 
+                "div.xod5an3:not(:empty), div.x1gg8mnh:not(:empty)")
+            
+            # リアクションボタンだけを持つ要素を除外するための追加チェック
+            reaction_buttons = element.find_elements(By.CSS_SELECTOR,
+                "div.x4vbgl9 div.x1i10hfl[role='button']")
+            
+            logger.info(f"画像/メディア要素の検出: 画像={len(images)}, メディア={len(media_containers)}, 画像コンテナ={len(image_containers)}")
+            
+            # 本文テキスト要素を取得（これがあり、他のメディア要素がなければテキストのみの投稿）
+            text_elements = element.find_elements(By.CSS_SELECTOR, "span.x1lliihq[dir='auto']")
+            
+            # デバッグ情報の追加：検出された画像の詳細をログに出力
+            if len(images) > 0:
+                for i, img in enumerate(images):
+                    try:
+                        alt = img.get_attribute('alt') or "なし"
+                        src = img.get_attribute('src') or "なし"
+                        width = img.get_attribute('width') or "不明"
+                        height = img.get_attribute('height') or "不明"
+                        
+                        # プロフィール写真やアイコンの可能性がある小さな画像を除外
+                        is_small_icon = (alt and ('プロフィール' in alt or 'Profile' in alt or 'いいね' in alt or 'Like' in alt)) or \
+                                       ((width != "不明" and height != "不明") and (int(width) < 50 or int(height) < 50))
+                        
+                        logger.info(f"画像 {i+1} の属性: alt='{alt}', サイズ={width}x{height}, アイコン判定={is_small_icon}")
+                        
+                        # プロフィール写真やアイコンと判断される画像はカウントから除外
+                        if is_small_icon:
+                            images.remove(img)
+                    except Exception as img_e:
+                        logger.warning(f"画像属性取得エラー: {img_e}")
+            
+            # リアクションボタンのみの場合は画像付き投稿と判定しない
+            if len(reaction_buttons) > 0 and len(images) == 0 and len(media_containers) == 0 and len(image_containers) == 0:
+                logger.info("リアクションボタンのみ検出 - 画像なしと判定")
+                return False
+            
+            # 実際の投稿画像があるかどうかの判定を厳格化
+            if len(images) > 0 or len(media_containers) > 0 or len(image_containers) > 0:
+                logger.info("画像付き投稿を検出")
+                return True
+            else:
+                logger.info("テキストのみの投稿と判定")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"画像判定中にエラー: {e}")
+            traceback.print_exc()
+            return False
+
+    def _extract_post_text(self, container):
+        """
+        投稿コンテナからテキストを抽出する
+        """
+        try:
+            # 投稿の本文テキストを直接取得するセレクタを使用
+            # 投稿本文は複数のspanに分かれている場合がある
+            text_spans = container.find_elements(By.CSS_SELECTOR, "div.x1a6qonq x6ikm8r x10wlt62 xj0a0fe x126k92a x6prxxf x7r5mf7 span")
+            if not text_spans:
+                # より一般的なセレクタを試す
+                text_spans = container.find_elements(By.CSS_SELECTOR, "div.x1a6qonq span")
+            
+            # すべてのテキストスパンを連結
+            post_text = " ".join([span.text.strip() for span in text_spans if span.text.strip()])
+            
+            # ハッシュタグもテキストとして含める
+            hashtags = container.find_elements(By.CSS_SELECTOR, "a[href*='search?q=']")
+            hashtag_texts = [tag.text.strip() for tag in hashtags if tag.text.strip()]
+            
+            # ハッシュタグを投稿テキストに追加
+            if hashtag_texts:
+                hashtag_str = " ".join(hashtag_texts)
+                if post_text:
+                    post_text = f"{post_text} {hashtag_str}"
+                else:
+                    post_text = hashtag_str
+                    
+            # テキストが見つからない場合は別の方法を試す
+            if not post_text:
+                # 直接コンテナ内のテキストを取得
+                post_text = container.find_element(By.CSS_SELECTOR, "div.x1xdureb").text.strip()
+                
+                # ユーザー名と日付部分を取り除く
+                username_elements = container.find_elements(By.CSS_SELECTOR, "a[href^='/@']")
+                for element in username_elements:
+                    if element.text.strip() in post_text:
+                        post_text = post_text.replace(element.text.strip(), "").strip()
+                
+                # 日付/時間要素を削除
+                time_elements = container.find_elements(By.CSS_SELECTOR, "time")
+                for time_el in time_elements:
+                    if time_el.text.strip() in post_text:
+                        post_text = post_text.replace(time_el.text.strip(), "").strip()
+            
+            return post_text.strip()
+        except Exception as e:
+            logger.warning(f"テキスト抽出エラー: {e}")
+            return ""
+
+    def _extract_likes(self, element):
+        """
+        投稿要素からいいね数を抽出する
+        
+        Args:
+            element: 投稿要素
+            
+        Returns:
+            int: いいね数（取得できない場合は0）
+        """
+        try:
+            # いいね数の要素を検索
+            like_elements = element.find_elements(By.CSS_SELECTOR, "span.x17qophe")
+            
+            if like_elements:
+                like_text = like_elements[0].text.strip()
+                
+                # 「K」や「万」などの省略形を処理
+                if 'K' in like_text or 'k' in like_text:
+                    return int(float(like_text.replace('K', '').replace('k', '')) * 1000)
+                elif '万' in like_text:
+                    return int(float(like_text.replace('万', '')) * 10000)
+                else:
+                    # 数字だけを抽出
+                    return int(''.join(filter(str.isdigit, like_text)) or 0)
+            
+            return 0
+        except Exception as e:
+            logger.warning(f"いいね数抽出中にエラー: {e}")
+            return 0
+
+    def _get_post_elements(self):
+        """
+        ページから投稿要素を取得する改良版メソッド
+        
+        Returns:
+            list: 投稿要素のリスト
+        """
+        try:
+            # 複数のセレクタを試す
+            selector_attempts = [
+                "article",  # 記事コンテナ
+                "div.x1ypdohk.x1n2onr6.xvuun6i",  # 投稿コンテナ
+                "div.xrvj5dj", # 別の投稿コンテナ
+                "div[role='article']"  # 記事ロールを持つdiv
+            ]
+            
+            post_elements = []
+            
+            for selector in selector_attempts:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    logger.info(f"Found {len(elements)} post containers with selector: {selector}")
+                    if not post_elements:  # まだ要素が見つかっていない場合のみ更新
+                        post_elements = elements
+                    
+            # 投稿コンテナがまだ見つからない場合はXPathも試す
+            if not post_elements:
+                xpath_expression = "//div[contains(@class, 'x1ypdohk') and contains(@class, 'x1n2onr6')]"
+                post_elements = self.driver.find_elements(By.XPATH, xpath_expression)
+                logger.info(f"Found {len(post_elements)} containers using XPath")
+                
+            # 見つかった要素を返す
+            return post_elements
+            
+        except Exception as e:
+            logger.warning(f"投稿要素の取得中にエラー: {e}")
+            return []
+
+    def _save_post_html_for_debug(self, element, index, prefix="post"):
+        """
+        デバッグ用に投稿のHTMLをファイルに保存
+        
+        Args:
+            element: 投稿要素
+            index: 投稿のインデックス
+            prefix: ファイル名のプレフィックス
+        """
+        try:
+            debug_dir = "debug_html"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            html_content = element.get_attribute('outerHTML')
+            filename = f"{debug_dir}/{prefix}_{index}_{timestamp}.html"
+            
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{html_content}</body></html>")
+            
+            logger.info(f"投稿{index}のHTMLを保存: {filename}")
+        except Exception as e:
+            logger.warning(f"HTML保存中にエラー: {e}")
+
+    def _scroll_to_bottom(self, count=10):
+        """
+        ページの最下部まで指定回数スクロールする
+        
+        Args:
+            count (int): 最下部までスクロールする回数
+        
+        Returns:
+            int: 検出した投稿数
+        """
+        logger.info(f"ページ最下部への到達を {count} 回実行します")
+        
+        last_height = 0
+        post_count = 0
+        
+        for i in range(count):
+            # 現在の投稿数を取得
+            current_posts = self._get_post_elements()
+            post_count = len(current_posts)
+            
+            # 最下部までスクロール
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            logger.info(f"スクロール {i+1}/{count}: 最下部に到達しました (現在の投稿: {post_count}件)")
+            
+            # スクロール後に短い待機
+            self._human_like_delay(2.0, 3.0)
+            
+            # 現在の高さを取得
+            current_height = self.driver.execute_script("return document.body.scrollHeight")
+            
+            # ページの高さが変わらなければ、新しいコンテンツがロードされなかった可能性がある
+            if current_height == last_height:
+                # コンテンツの読み込みをもう少し待つ
+                logger.info("ページの高さが変わらないため、追加で待機...")
+                self._human_like_delay(3.0, 5.0)
+                
+                # 「もっと見る」ボタンがあれば押す
+                try:
+                    more_buttons = self.driver.find_elements(By.XPATH, "//span[contains(text(), 'もっと見る') or contains(text(), 'See more')]")
+                    if more_buttons:
+                        more_buttons[0].click()
+                        logger.info("「もっと見る」ボタンをクリックしました")
+                        self._human_like_delay(2.0, 3.0)
+                except Exception as e:
+                    logger.debug(f"「もっと見る」ボタンの操作に失敗: {e}")
+            
+            # 高さを更新
+            last_height = current_height
+        
+        # 最後に検出された投稿数を返す
+        final_posts = self._get_post_elements()
+        logger.info(f"最下部スクロール完了: 合計 {len(final_posts)}件 の投稿を検出")
+        return len(final_posts)
+
 def get_accounts_from_env():
     """
     .env ファイルから複数のアカウント情報を取得
@@ -1251,129 +1759,74 @@ def get_accounts_from_env():
     
     return accounts
 
-# 複数アカウントでThreadsのタイムラインから投稿を取得し、単一のCSVファイルに保存する関数
-def scrape_threads_with_multiple_accounts(accounts, max_posts_per_account=30, headless=False, exclude_image_posts=True, min_likes=500):
+def load_config(config_file='config.json'):
     """
-    複数のアカウントを使ってThreadsのタイムラインから投稿を取得する関数（ログイン処理を強化）
+    設定ファイルからターゲットとキーワードを読み込む
     
     Args:
-        accounts (list): ユーザー名とパスワードのタプルのリスト [(username1, password1), (username2, password2), ...]
-        max_posts_per_account (int): アカウントごとに取得する最大投稿数
-        headless (bool): ヘッドレスモードで実行するかどうか
-        exclude_image_posts (bool): 画像を含む投稿を除外するかどうか
-        min_likes (int): 保存する最小いいね数（デフォルトは500）
+        config_file (str): 設定ファイルのパス
+        
+    Returns:
+        list: ターゲット情報のリスト [{'name': 'ターゲット名', 'keywords': [キーワード1, キーワード2, ...]}]
+    """
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        targets = config.get('targets', [])
+        if not targets:
+            logger.warning(f"No targets found in config file: {config_file}")
+        else:
+            logger.info(f"Loaded {len(targets)} targets from config file")
+            for target in targets:
+                logger.info(f"Target: {target['name']}, Keywords: {', '.join(target['keywords'])}")
+        
+        return targets
+    except Exception as e:
+        logger.error(f"Error loading config file: {e}")
+        return []
+
+def create_data_directory():
+    """
+    データ保存用のディレクトリを作成する
     
     Returns:
-        str: 保存されたCSVファイルのパス
+        str: 作成されたディレクトリのパス
     """
-    all_posts = []
-    csv_filename = f"threads_posts_{datetime.datetime.now().strftime('%m%d_%H%M')}.csv"
+    # データディレクトリが存在しない場合は作成
+    if not os.path.exists('data'):
+        os.makedirs('data')
+        logger.info("Created 'data' directory")
     
-    # アカウント情報のチェック（デバッグ用）
-    for i, (username, password) in enumerate(accounts):
-        if username and password:
-            logger.info(f"Account {i+1}: Username provided ({len(username)} chars), Password provided ({len(password)} chars)")
-        else:
-            logger.warning(f"Account {i+1}: Missing {'username' if not username else ''} {'password' if not password else ''}")
+    # 現在の日時を含むディレクトリ名を生成
+    now = datetime.datetime.now()
+    dir_name = f"data/{now.strftime('%Y%m%d_%H%M%S')}"
     
-    account_count = len(accounts)
-    for i, (username, password) in enumerate(accounts, 1):
-        logger.info(f"Starting scraping with account {i}/{account_count}: {username or '[No username provided]'}")
-        scraper = ThreadsScraper(headless=headless)
-        
-        try:
-            # ログイン情報があるか確認
-            if username and password:
-                logger.info(f"Attempting to login with username: {username}")
-                # 最初にログインページに直接アクセス
-                scraper.driver.get("https://www.threads.net/login")
-                logger.info("Navigated to direct login URL: https://www.threads.net/login")
-                scraper._wait_for_page_load()
-                
-                # ログイン処理
-                login_success = scraper.login(username, password)
-                if login_success:
-                    logger.info("Login successful! Proceeding to scrape timeline.")
-                    # ログイン成功後、タイムラインに移動
-                    scraper.navigate_to_threads()
-                else:
-                    logger.warning("Login failed. Attempting to scrape without login.")
-                    # ログイン失敗時もタイムラインに移動
-                    scraper.navigate_to_threads()
-            else:
-                logger.warning("No login credentials provided. Scraping without login.")
-                # ログイン情報がない場合、直接タイムラインに移動
-                scraper.navigate_to_threads()
-            
-            # 投稿を取得
-            posts = scraper.extract_posts(max_posts=max_posts_per_account, exclude_image_posts=exclude_image_posts)
-            all_posts.extend(posts)
-            
-            logger.info(f"Collected {len(posts)} posts with account {i}")
-            
-        except Exception as e:
-            logger.error(f"Error during scraping with account {username}: {e}")
-            logger.error(traceback.format_exc())
-        finally:
-            # 必ずスクレイパーを閉じる
-            scraper.close()
+    # ディレクトリを作成
+    os.makedirs(dir_name)
+    logger.info(f"Created data directory: {dir_name}")
     
-    # すべてのデータを一つのCSVファイルに保存
-    if all_posts:
-        # 重複の削除とCSV保存
-        unique_posts = []
-        seen_post_identifiers = set()
-        
-        for username, post_text, likes in all_posts:
-            # ユーザー名と投稿内容の最初の部分で一意性を確保
-            post_id = f"{username}:{post_text[:30]}"
-            if post_id not in seen_post_identifiers:
-                unique_posts.append((username, post_text, likes))
-                seen_post_identifiers.add(post_id)
-        
-        # データフレームを作成して保存
-        df = pd.DataFrame(unique_posts, columns=["username", "post_text", "likes"])
-        
-        # 元のCSVファイルを保存
-        df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-        logger.info(f"Saved a total of {len(unique_posts)} unique posts to {csv_filename}")
-        
-        # いいね数でフィルタリング
-        if min_likes > 0:
-            filtered_df = df[df['likes'] > min_likes]
-            filtered_count = len(filtered_df)
-            
-            # フィルター後のファイル名を生成
-            filtered_filename = csv_filename.replace('.csv', f'_likes{min_likes}plus.csv')
-            
-            # フィルター後のデータを保存
-            filtered_df.to_csv(filtered_filename, index=False, encoding='utf-8-sig')
-            logger.info(f"Filtered to {filtered_count} posts with more than {min_likes} likes in {filtered_filename}")
-            
-            # 削除された投稿数を表示
-            removed_count = len(df) - filtered_count
-            logger.info(f"Removed {removed_count} posts with {min_likes} or fewer likes")
-            
-            return filtered_filename
-        
-        return csv_filename
-    else:
-        logger.warning("No posts were collected from any account")
-        return None
+    return dir_name
 
-def scrape_threads_posts(max_posts=100, headless=False, exclude_image_posts=True, min_likes=500):
+def scrape_threads_by_keywords(max_posts_per_keyword=30, headless=False, exclude_image_posts=True, min_likes=500):
     """
-    Threadsから投稿をスクレイピングする関数（main.pyとの互換性のため）
+    設定ファイルからキーワードを読み込み、Threadsでキーワード検索した結果をスクレイピングする
     
     Args:
-        max_posts (int): 1アカウントあたりの最大取得投稿数
+        max_posts_per_keyword (int): 1キーワードあたりの最大取得投稿数
         headless (bool): ヘッドレスモードで実行するかどうか
         exclude_image_posts (bool): 画像付き投稿を除外するかどうか
         min_likes (int): フィルタリングするいいねの最小数
         
     Returns:
-        str: 保存したCSVファイルのパス、または失敗時はNone
+        str: 保存したデータディレクトリのパス、または失敗時はNone
     """
+    # 設定ファイルを読み込む
+    targets = load_config()
+    if not targets:
+        logger.error("No valid targets found in config file")
+        return None
+    
     # .envファイルからアカウント情報を取得
     accounts = get_accounts_from_env()
     
@@ -1381,14 +1834,114 @@ def scrape_threads_posts(max_posts=100, headless=False, exclude_image_posts=True
         logger.warning("アカウント情報が見つかりません。ログインなしでスクレイピングを試みます。")
         accounts = [("", "")]  # 空のログイン情報
     
-    # スクレイピング実行（1アカウントあたり30投稿に制限）
-    return scrape_threads_with_multiple_accounts(
-        accounts=accounts,
-        max_posts_per_account=max_posts,  # mainからのmax_postsをそのまま使用
-        headless=headless,
-        exclude_image_posts=exclude_image_posts,
-        min_likes=min_likes
-    )
+    # データ保存用のディレクトリを作成
+    data_dir = create_data_directory()
+    
+    # アカウントごとに処理するターゲットを分散
+    account_count = max(1, len(accounts))
+    targets_per_account = [[] for _ in range(account_count)]
+    
+    # ターゲットを各アカウントに分配
+    for i, target in enumerate(targets):
+        account_index = i % account_count
+        targets_per_account[account_index].append(target)
+    
+    # 各アカウントでスクレイピングを実行
+    for account_index, (username, password) in enumerate(accounts):
+        account_targets = targets_per_account[account_index]
+        if not account_targets:
+            logger.info(f"No targets assigned to account {account_index+1}")
+            continue
+        
+        logger.info(f"Processing {len(account_targets)} targets with account {account_index+1}")
+        
+        # スクレイパーを初期化
+        scraper = ThreadsScraper(headless=headless)
+        
+        try:
+            # ログイン
+            logged_in = False
+            if username and password:
+                try:
+                    scraper.driver.get("https://www.threads.net/login")
+                    scraper._wait_for_page_load()
+                    logged_in = scraper.login(username, password)
+                    if logged_in:
+                        logger.info(f"Successfully logged in with account {account_index+1}")
+                    else:
+                        logger.warning(f"Login failed for account {account_index+1}")
+                except Exception as e:
+                    logger.error(f"Error during login: {e}")
+            
+            # 各ターゲットとキーワードで検索
+            for target in account_targets:
+                target_name = target.get('name', 'unknown')
+                keywords = target.get('keywords', [])
+                
+                if not keywords:
+                    logger.warning(f"No keywords found for target: {target_name}")
+                    continue
+                
+                logger.info(f"Processing target: {target_name} with {len(keywords)} keywords")
+                
+                all_posts = []
+                
+                # 各キーワードで検索
+                for keyword in keywords:
+                    logger.info(f"Searching for keyword: {keyword}")
+                    
+                    posts = scraper.extract_posts_from_search(
+                        keyword=keyword,
+                        max_posts=max_posts_per_keyword,
+                        exclude_image_posts=exclude_image_posts,
+                        min_likes=min_likes,
+                        target=target_name
+                    )
+                    
+                    logger.info(f"Collected {len(posts)} posts for keyword: {keyword}")
+                    all_posts.extend(posts)
+                    
+                    # 連続検索の間に適度な待機
+                    scraper._human_like_delay(4.0, 8.0)
+                
+                # 重複を除外
+                unique_posts = []
+                seen_posts = set()
+                
+                for post in all_posts:
+                    post_id = f"{post[0]}:{post[1][:30]}"
+                    if post_id not in seen_posts:
+                        unique_posts.append(post)
+                        seen_posts.add(post_id)
+                
+                # ターゲットごとにCSVファイルを保存
+                if unique_posts:
+                    now = datetime.datetime.now()
+                    filename = f"{data_dir}/{target_name}.csv"
+                    
+                    # CSVに保存
+                    csv_file = scraper.save_to_csv(
+                        posts=unique_posts,
+                        filename=filename,
+                        min_likes=min_likes
+                    )
+                    
+                    if csv_file:
+                        logger.info(f"Saved {len(unique_posts)} posts for target {target_name} to {csv_file}")
+                    else:
+                        logger.warning(f"Failed to save posts for target {target_name}")
+                else:
+                    logger.warning(f"No posts collected for target {target_name}")
+        
+        except Exception as e:
+            logger.error(f"Error during scraping: {e}")
+            logger.error(traceback.format_exc())
+        
+        finally:
+            # スクレイパーを閉じる
+            scraper.close()
+    
+    return data_dir
 
 # メイン実行関数
 if __name__ == "__main__":
@@ -1399,44 +1952,29 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Threads投稿スクレイピングツール')
-    parser.add_argument('--max-posts', type=int, default=100, help='取得する最大投稿数')
+    parser.add_argument('--max-posts', type=int, default=30, help='1キーワードあたりの取得する最大投稿数')
     parser.add_argument('--headless', action='store_true', help='ヘッドレスモードで実行')
     parser.add_argument('--with-images', action='store_true', help='画像付き投稿も含める')
-    parser.add_argument('--min-likes', type=int, default=500, help='保存する最小いいね数（これ以下の投稿は除外）')
-    parser.add_argument('--username', type=str, help='Threadsにログインするためのユーザー名')
-    parser.add_argument('--password', type=str, help='Threadsにログインするためのパスワード')
-    parser.add_argument('--login-required', action='store_true', help='ログイン必須モード（ログインが失敗した場合はスクレイピングを中止）')
+    parser.add_argument('--min-likes', type=int, default=100, help='保存する最小いいね数（これ以下の投稿は除外）')
+    parser.add_argument('--config', type=str, default='config.json', help='設定ファイルのパス')
     
     args = parser.parse_args()
     
-    # コマンドライン引数のログイン情報を優先
-    if args.username and args.password:
-        accounts = [(args.username, args.password)]
-        print(f"コマンドライン引数からログイン情報を取得しました: {args.username}")
-    else:
-        # .env ファイルからアカウント情報を取得
-        accounts = get_accounts_from_env()
+    # configのパスをカスタマイズ可能に
+    if args.config != 'config.json':
+        logger.info(f"Using custom config file: {args.config}")
     
-    if not accounts:
-        print("警告: ログイン情報が見つかりません。ログインなしでスクレイピングを試みます。")
-        if args.login_required:
-            print("エラー: ログイン必須モードが指定されていますが、ログイン情報が提供されていません。")
-            sys.exit(1)
-        accounts = [("", "")]  # 空のログイン情報
-    else:
-        print(f"{len(accounts)}個のアカウント情報が見つかりました。")
-    
-    # スクレイピング実行
-    csv_file = scrape_threads_posts(
-        max_posts=args.max_posts,
+    # キーワード検索ベースでスクレイピング実行
+    data_dir = scrape_threads_by_keywords(
+        max_posts_per_keyword=args.max_posts,
         headless=args.headless,
         exclude_image_posts=not args.with_images,
         min_likes=args.min_likes
     )
     
-    if csv_file:
-        print(f"スクレイピングが完了しました。結果は {csv_file} に保存されています。")
+    if data_dir:
+        print(f"スクレイピングが完了しました。結果は {data_dir} に保存されています。")
         if args.min_likes > 0:
-            print(f"いいね数が{args.min_likes}を超える投稿のみが保存されています。")
+            print(f"いいね数が{args.min_likes}以上の投稿のみが保存されています。")
     else:
         print("スクレイピングに失敗しました。ログを確認してください。")
