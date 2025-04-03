@@ -451,147 +451,202 @@ class ThreadsScraper:
     
     def login(self, username, password):
         """
-        Threadsにログインする
+        Threadsにログインする (人間らしい挙動の強化版)
         """
         try:
             # 直接ログインページにアクセス
             self.driver.get("https://www.threads.net/login")
             logger.info("Navigated to direct login URL: https://www.threads.net/login")
-            self._wait_for_page_load(20)  # ページのロードを十分待つ
             
-            # 人間らしい遅延
-            self._human_like_delay(3.0, 5.0)
+            # 初期ロード時に長めに待機（5-8秒）
+            initial_wait = random.uniform(5.0, 8.0)
+            time.sleep(initial_wait)
+            logger.info(f"Initial page load wait: {initial_wait:.2f}s")
             
-            # デバッグ用にスクリーンショット保存
-            self.driver.save_screenshot("login_page.png")
-            logger.info("Saved screenshot of login page")
+            # ページをわずかにスクロール (ランダムな回数と速度)
+            self._random_scrolling(min_scrolls=1, max_scrolls=3)
             
-            # 日本語プレースホルダーに基づいたXPathセレクタ
-            username_xpath = "//input[@placeholder='ユーザーネーム、携帯電話番号、またはメールアドレス']"
+            # ユーザー名入力前に少し待機
+            self._human_like_delay(2.0, 4.0)
             
-            # CSSセレクタの方法（autocomplete属性を使用）
-            username_css = "input[autocomplete='username']"
+            # ユーザー名入力欄を複数の方法で検索（既存コードは維持）
+            username_selectors = [
+                "//input[@placeholder='ユーザーネーム、携帯電話番号、またはメールアドレス']",
+                "input[autocomplete='username']",
+                "input[type='text'][autocapitalize='none']",
+                "input[type='text']"
+            ]
             
-            # ユーザー名入力欄を見つける
-            try:
-                # 複数の方法で検索
-                username_selectors = [
-                    username_xpath,
-                    username_css,
-                    "input[type='text'][autocapitalize='none']",
-                    "input[type='text']"
-                ]
-                
-                username_field = None
-                for selector in username_selectors:
-                    try:
-                        if selector.startswith("//"):
-                            username_field = WebDriverWait(self.driver, 5).until(
-                                EC.presence_of_element_located((By.XPATH, selector))
-                            )
-                        else:
-                            username_field = WebDriverWait(self.driver, 5).until(
-                                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                            )
-                        logger.info(f"Username field found with selector: {selector}")
-                        break
-                    except:
-                        continue
-                
-                if not username_field:
-                    # 全ての入力フィールドを探す最終手段
-                    inputs = self.driver.find_elements(By.TAG_NAME, "input")
-                    for inp in inputs:
-                        if inp.get_attribute("type") == "text":
-                            username_field = inp
-                            logger.info("Username field found by searching all input fields")
-                            break
-                
-                if not username_field:
-                    logger.error("Could not find username field")
-                    return False
-                
-                # 人間らしいタイピングでユーザー名を入力
-                self._human_like_typing(username_field, username)
-                logger.info(f"Successfully entered username: {username}")
-                
-                # Enterキーを押す前に少し待機
-                self._human_like_delay(1.0, 2.0)
-                
-                # パスワード入力欄を見つける
-                password_css = "input[type='password']"
-                password_field = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, password_css))
-                )
-                
-                # 人間らしいタイピングでパスワードを入力
-                self._human_like_typing(password_field, password)
-                logger.info("Password entered successfully")
-                
-                # ログインボタンを見つける
+            username_field = None
+            for selector in username_selectors:
                 try:
-                    login_button_selectors = [
-                        "//div[contains(text(), 'ログイン') and @role='button']",
-                        "//div[@role='button']//div[contains(@class, 'xwhw2v2')]",
-                        "div.x1i10hfl[role='button']"
-                    ]
-                    
-                    login_button = None
-                    for selector in login_button_selectors:
-                        try:
-                            if selector.startswith("//"):
-                                login_button = WebDriverWait(self.driver, 5).until(
-                                    EC.element_to_be_clickable((By.XPATH, selector))
-                                )
-                            else:
-                                login_button = WebDriverWait(self.driver, 5).until(
-                                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                                )
-                            logger.info(f"Login button found with selector: {selector}")
-                            break
-                        except:
-                            continue
-                    
-                    if login_button:
-                        # 人間らしいクリック
-                        self._safe_click(login_button)
-                        logger.info("Login button clicked")
+                    if selector.startswith("//"):
+                        username_field = WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
                     else:
-                        # ボタンが見つからない場合はエンターキーを押す
-                        self._human_like_delay(0.5, 1.0)
-                        password_field.send_keys(Keys.RETURN)
-                        logger.info("Pressed Enter key to submit login form")
-                except Exception as e:
-                    logger.warning(f"Could not find login button: {e}")
-                    # ログインボタンが見つからない場合はエンターキーを押す
-                    self._human_like_delay(0.5, 1.0)
-                    password_field.send_keys(Keys.RETURN)
-                    logger.info("Pressed Enter key to submit login form")
-                
-                # ログイン完了を待機
-                self._human_like_delay(5.0, 8.0)
-                
-                # ログイン成功の確認
-                if "login" not in self.driver.current_url.lower():
-                    logger.info(f"Login successful! Current URL: {self.driver.current_url}")
-                    return True
-                else:
-                    logger.warning(f"Still on login page after login attempt: {self.driver.current_url}")
-                    return False
-                
-            except Exception as e:
-                logger.error(f"Error during login form interaction: {e}")
-                logger.error(traceback.format_exc())
-                # スクリーンショットを保存
-                self.driver.save_screenshot("login_error.png")
-                logger.info("Saved screenshot of login error")
+                        username_field = WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                    logger.info(f"Username field found with selector: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not username_field:
+                logger.error("Username field not found")
                 return False
             
+            # ユーザー名入力前に少しスクロール
+            self._random_scrolling(min_scrolls=1, max_scrolls=2, pixel_range=(50, 200))
+            
+            # ユーザー名をゆっくりと1文字ずつ入力
+            self._type_like_human(username_field, username)
+            logger.info(f"Successfully entered username: {username}")
+            
+            # 入力後にわずかな時間待機
+            self._human_like_delay(1.5, 3.0)
+            
+            # Tabキーを使ってパスワードフィールドに移動する場合がある
+            if random.random() < 0.4:  # 40%の確率でTab使用
+                username_field.send_keys(Keys.TAB)
+                logger.info("Used TAB key to move to password field")
+                self._human_like_delay(0.5, 1.5)
+                password_field = self.driver.switch_to.active_element
+            else:
+                # 既存のパスワードフィールド検出ロジックを使用
+                try:
+                    password_field = WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
+                    )
+                    logger.info("Password field found")
+                except:
+                    logger.error("Password field not found")
+                    return False
+                
+                # パスワードフィールドをクリックする前に少し待機
+                self._human_like_delay(1.0, 2.5)
+                
+                # クリック方法をランダムに選択
+                click_methods = ["normal", "js", "action_chains"]
+                click_method = random.choice(click_methods)
+                
+                if click_method == "normal":
+                    password_field.click()
+                    logger.info("Normal click on password field")
+                elif click_method == "js":
+                    self.driver.execute_script("arguments[0].click();", password_field)
+                    logger.info("JavaScript click on password field")
+                else:
+                    ActionChains(self.driver).move_to_element(password_field).click().perform()
+                    logger.info("ActionChains click on password field")
+            
+            # パスワードをゆっくりと入力
+            self._type_like_human(password_field, password)
+            logger.info("Password entered successfully")
+            
+            # 入力後にわずかな時間待機
+            self._human_like_delay(2.0, 4.0)
+            
+            # ログインボタンをクリックする前にページをわずかにスクロール
+            self._random_scrolling(min_scrolls=1, max_scrolls=2, pixel_range=(20, 100))
+            
+            # ログインボタンを見つける
+            login_button_selectors = [
+                "//div[@role='button']//div[contains(@class, 'xwhw2v2')]",
+                "//div[contains(text(), 'ログイン')]",
+                "//button[contains(text(), 'ログイン')]",
+                "button[type='submit']"
+            ]
+            
+            login_button = None
+            for selector in login_button_selectors:
+                try:
+                    if selector.startswith("//"):
+                        login_button = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, selector))
+                        )
+                    else:
+                        login_button = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                    logger.info(f"Login button found with selector: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not login_button:
+                logger.error("Login button not found")
+                return False
+            
+            # ログインボタンクリック前に待機
+            self._human_like_delay(1.5, 3.0)
+            
+            # クリック方法をランダムに選択
+            click_methods = ["normal", "js", "action_chains"]
+            click_method = random.choice(click_methods)
+            
+            if click_method == "normal":
+                login_button.click()
+                logger.info("Normal click on login button")
+            elif click_method == "js":
+                self.driver.execute_script("arguments[0].click();", login_button)
+                logger.info("JavaScript click on login button")
+            else:
+                ActionChains(self.driver).move_to_element(login_button).click().perform()
+                logger.info("ActionChains click on login button")
+            
+            logger.info("Login button clicked")
+            
+            # ログインプロセス後に十分な時間待機
+            time.sleep(random.uniform(12.0, 15.0))
+            
+            # ログイン成功を確認
+            current_url = self.driver.current_url
+            if "login" in current_url.lower():
+                logger.warning(f"Still on login page after login attempt: {current_url}")
+                return False
+            
+            logger.info(f"Login successful, redirected to: {current_url}")
+            return True
+            
         except Exception as e:
-            logger.error(f"Error during login: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Login failed with error: {e}")
             return False
-    
+
+    def _type_like_human(self, element, text):
+        """
+        人間のようにテキストを入力する関数
+        """
+        for char in text:
+            element.send_keys(char)
+            # 文字ごとにランダムな待機時間（より自然な入力速度）
+            time.sleep(random.uniform(0.05, 0.25))
+        
+        # 入力完了後に少し待機
+        time.sleep(random.uniform(0.3, 0.7))
+
+    def _random_scrolling(self, min_scrolls=1, max_scrolls=3, pixel_range=(100, 300)):
+        """
+        ランダムなスクロールを行う関数
+        """
+        num_scrolls = random.randint(min_scrolls, max_scrolls)
+        
+        for _ in range(num_scrolls):
+            # スクロール量をランダムに決定
+            scroll_amount = random.randint(pixel_range[0], pixel_range[1])
+            
+            # 上下どちらにスクロールするかランダムに決定（75%の確率で下方向）
+            if random.random() < 0.75:
+                self.driver.execute_script(f"window.scrollBy(0, {scroll_amount});")
+            else:
+                self.driver.execute_script(f"window.scrollBy(0, -{scroll_amount});")
+            
+            # スクロール後に待機
+            time.sleep(random.uniform(0.3, 1.2))
+        
+        logger.info(f"Performed {num_scrolls} random scrolls")
+
     def navigate_to_threads(self):
         """
         Threadsのホームページに移動する
