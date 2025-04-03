@@ -87,6 +87,112 @@ class ThreadsScraper:
         delay = random.uniform(min_sec, max_sec)
         time.sleep(delay)
     
+    def _scroll_with_strategy(self, strategy="normal", iterations=5, scroll_amount=300):
+        """
+        様々なスクロール戦略を1つの関数に統合
+        
+        Args:
+            strategy (str): スクロール戦略 ("normal", "deep", "human", "progressive", "bottom")
+            iterations (int): スクロール回数
+            scroll_amount (int): 基本スクロール量
+            
+        Returns:
+            bool: 新しいコンテンツが読み込まれたかどうか
+        """
+        logger.info(f"Scrolling with {strategy} strategy for {iterations} iterations")
+        new_content_loaded = False
+        
+        # 初期要素数を記録
+        initial_elements = len(self.driver.find_elements(By.CSS_SELECTOR, "article"))
+        
+        if strategy == "bottom":
+            # 最下部へのスクロール
+            for i in range(iterations):
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                logger.info(f"Bottom scroll {i+1}/{iterations}")
+                self._human_like_delay(2.0, 3.0)
+                
+                # フィードの終わりをチェック
+                if self._check_end_of_feed():
+                    logger.info("Reached end of feed")
+                    break
+        
+        elif strategy == "deep":
+            # 深いスクロール
+            for i in range(iterations):
+                logger.info(f"Deep scroll iteration {i+1}/{iterations}")
+                
+                # 現在表示中の最後の投稿要素までスクロール
+                try:
+                    articles = self.driver.find_elements(By.CSS_SELECTOR, "article")
+                    if articles:
+                        self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'end'});", 
+                                                  articles[-1])
+                        self._human_like_delay(1.0, 2.0)
+                        self.driver.execute_script("window.scrollBy({top: 1000, behavior: 'smooth'});")
+                except Exception as e:
+                    logger.warning(f"Error scrolling to last article: {e}")
+                
+                self._human_like_delay(4.0, 6.0)
+        
+        elif strategy == "human":
+            # 人間らしいスクロール
+            for _ in range(iterations):
+                # ランダムなスクロール
+                scroll_distance = random.randint(400, 800)
+                before_height = self.driver.execute_script("return document.body.scrollHeight")
+                
+                # ランダムな速度でスクロール
+                scroll_behavior = random.choice(["auto", "smooth"])
+                self.driver.execute_script(f"window.scrollBy({{top: {scroll_distance}, behavior: '{scroll_behavior}'}});")
+                
+                self._human_like_delay(1.5, 3.0)
+                
+                after_height = self.driver.execute_script("return document.body.scrollHeight")
+                if after_height > before_height:
+                    new_content_loaded = True
+                    
+                # 時々少し戻る（より人間らしく）
+                if random.random() < 0.15:
+                    self.driver.execute_script(f"window.scrollBy({{top: {-random.randint(50, 100)}, behavior: 'auto'}});")
+                    self._human_like_delay(0.5, 1.0)
+        
+        elif strategy == "progressive":
+            # 段階的スクロール
+            for i in range(iterations):
+                window_height = self.driver.execute_script("return window.innerHeight")
+                scroll_amount = int(window_height * 0.8)
+                
+                self.driver.execute_script(f"window.scrollBy(0, {scroll_amount});")
+                logger.info(f"Progressive scroll #{i+1}: scrolled {scroll_amount}px")
+                
+                self._human_like_delay(2.0, 3.0)
+                
+                # 時々一時停止
+                if i % 5 == 4:
+                    pause_time = random.uniform(1.5, 3.0)
+                    time.sleep(pause_time)
+                    
+                    # 上下の微調整
+                    self.driver.execute_script("window.scrollBy(0, -200);")
+                    time.sleep(0.8)
+                    self.driver.execute_script("window.scrollBy(0, 250);")
+                    time.sleep(1.0)
+        
+        else:  # normal
+            # 通常のスクロール
+            for i in range(iterations):
+                self.driver.execute_script(f"window.scrollBy(0, {scroll_amount});")
+                self._human_like_delay(1.0, 2.0)
+        
+        # 最終的な要素数をチェック
+        final_elements = len(self.driver.find_elements(By.CSS_SELECTOR, "article"))
+        elements_added = final_elements - initial_elements
+        
+        logger.info(f"Scroll complete: {elements_added} new elements loaded (total: {final_elements})")
+        
+        return elements_added > 0 or new_content_loaded
+    
     def _safe_scroll(self, scroll_amount=300):
         """
         安全なスクロール方法（JavaScriptを使用）- 改良版
@@ -1776,6 +1882,265 @@ class ThreadsScraper:
         final_posts = self._get_post_elements()
         logger.info(f"最下部スクロール完了: 合計 {len(final_posts)}件 の投稿を検出")
         return len(final_posts)
+
+    # 1. _wait_for_element メソッドの追加 - 待機処理を統合
+    def _wait_for_element(self, by, selector, timeout=10, condition="presence"):
+        """
+        要素の待機処理を統合したヘルパーメソッド
+        
+        Args:
+            by: 検索方法 (By.ID, By.CSS_SELECTOR など)
+            selector: 要素のセレクタ
+            timeout: 最大待機時間(秒)
+            condition: 待機条件 ("presence", "clickable", "visible")
+            
+        Returns:
+            見つかった要素またはNone
+        """
+        try:
+            if condition == "clickable":
+                element = WebDriverWait(self.driver, timeout).until(
+                    EC.element_to_be_clickable((by, selector))
+                )
+            elif condition == "visible":
+                element = WebDriverWait(self.driver, timeout).until(
+                    EC.visibility_of_element_located((by, selector))
+                )
+            else:  # presence
+                element = WebDriverWait(self.driver, timeout).until(
+                    EC.presence_of_element_located((by, selector))
+                )
+            return element
+        except Exception as e:
+            logger.debug(f"要素待機タイムアウト - {selector}: {e}")
+            return None
+
+    # 2. _is_spam_post メソッドの追加 - スパム判定ロジックを統合
+    def _is_spam_post(self, username, post_text):
+        """
+        スパム投稿かどうかを判定するメソッド
+        
+        Args:
+            username: 投稿者名
+            post_text: 投稿テキスト
+            
+        Returns:
+            bool: スパム投稿であればTrue
+        """
+        # ユーザー名チェック - 数字だけのユーザー名は通常本物のユーザーではない
+        if not username or username.isdigit():
+            return True
+            
+        # 投稿テキストチェック - 明らかな広告やスパム
+        spam_patterns = [
+            "100円note", "月5万", "裏技", "副業", "スキル０", "在宅", "稼げる",
+            "Line登録", "権利収入", "不労所得"
+        ]
+        
+        # スパムパターンを含む場合はスパム判定
+        if any(pattern in post_text for pattern in spam_patterns):
+            return True
+            
+        # 短すぎる投稿は除外
+        if len(post_text) < 5:
+            return True
+            
+        # メタデータや時間表示のみの投稿を除外
+        if post_text in [username, f"{username}_", f"@{username}"]:
+            return True
+            
+        # ユーザー名と同じ投稿テキストを除外
+        if username == post_text:
+            return True
+        
+        # UI要素っぽいテキストを除外（既存の_is_ui_element_textメソッドを使用）
+        if self._is_ui_element_text(post_text):
+            return True
+            
+        return False
+
+    # 3. extract_post_data メソッドの改善 - データ抽出ロジックの整理
+    def extract_post_data(self, article, target=None):
+        """
+        投稿記事から必要なデータを抽出する
+        
+        Args:
+            article: 投稿記事要素
+            target: ターゲット名（オプション）
+            
+        Returns:
+            tuple: (username, post_text, likes, has_image) または None
+        """
+        try:
+            # ユーザー名の抽出を試みる（複数のセレクタパターンを試す）
+            username = None
+            username_selectors = [
+                "span.xu06os2[dir='auto']",
+                "a[href^='/@'] span",
+                "div.xqcrz7y a[href^='/@']"
+            ]
+            
+            # セレクタを順に試す
+            for selector in username_selectors:
+                try:
+                    username_element = article.find_element(By.CSS_SELECTOR, selector)
+                    username = username_element.text.strip()
+                    if username:
+                        if username.startswith("@"):
+                            username = username[1:]
+                        break
+                except:
+                    continue
+                    
+            # バックアップ: hrefから抽出
+            if not username:
+                try:
+                    href_element = article.find_element(By.CSS_SELECTOR, "a[href^='/@']")
+                    href = href_element.get_attribute("href")
+                    username = href.split("/@")[1].split("/")[0]
+                except:
+                    username = "unknown"
+                    
+            # 投稿テキストの抽出を試みる（複数のセレクタパターンを試す）
+            post_text = None
+            text_selectors = [
+                "div.xdj266r.x11i5rnm.xat24cr.x1mh8g0r.x1vvkbs",
+                "div[dir='auto']",
+                "span[dir='auto']"
+            ]
+            
+            # より確実なセレクタでテキスト要素を探す
+            for selector in text_selectors:
+                try:
+                    text_elements = article.find_elements(By.CSS_SELECTOR, selector)
+                    # 最も長いテキストを選択（通常は投稿本文が最長）
+                    if text_elements:
+                        longest_text = max([e.text.strip() for e in text_elements if e.text.strip()], 
+                                         key=len, default="")
+                        if longest_text and len(longest_text) > 3:  # 最低限の長さをチェック
+                            post_text = longest_text
+                            break
+                except:
+                    continue
+                    
+            if not post_text:
+                # 最後の手段としてページのテキストから抽出を試みる
+                try:
+                    # 記事全体のテキストを取得
+                    full_text = article.text
+                    # 行に分割して短すぎない行を選択
+                    lines = [line.strip() for line in full_text.split('\n') if len(line.strip()) > 5]
+                    if lines:
+                        # ユーザー名を含まない最長の行を選択
+                        filtered_lines = [line for line in lines if username not in line]
+                        post_text = max(filtered_lines, key=len) if filtered_lines else lines[0]
+                except:
+                    post_text = ""
+                    
+            # いいね数の抽出
+            likes = 0
+            try:
+                likes_elements = article.find_elements(By.CSS_SELECTOR, "span.x1lliihq")
+                for element in likes_elements:
+                    text = element.text.strip()
+                    # いいね数の形式をチェック（例: "123件" や "1.2K件"）
+                    if text and ('件' in text or 'K' in text or 'M' in text):
+                        # 数値部分を抽出
+                        num_str = ''.join(c for c in text if c.isdigit() or c == '.' or c == 'K' or c == 'M')
+                        # 単位に応じて変換
+                        if 'K' in num_str:
+                            likes = int(float(num_str.replace('K', '')) * 1000)
+                        elif 'M' in num_str:
+                            likes = int(float(num_str.replace('M', '')) * 1000000)
+                        else:
+                            try:
+                                likes = int(float(num_str))
+                            except:
+                                likes = 0
+                        break
+            except Exception as e:
+                logger.debug(f"いいね数の抽出に失敗: {e}")
+                
+            # 画像付き投稿かどうかを確認
+            has_image = False
+            try:
+                images = article.find_elements(By.TAG_NAME, "img")
+                # プロフィール画像以外の画像が存在するか
+                has_image = len([img for img in images if not (
+                    'profile' in (img.get_attribute('alt') or '').lower() or
+                    'avatar' in (img.get_attribute('class') or '').lower()
+                )]) > 0
+            except:
+                pass
+                
+            # スパムチェック
+            if self._is_spam_post(username, post_text):
+                return None
+                
+            return (username, post_text, likes, has_image)
+            
+        except Exception as e:
+            logger.debug(f"投稿データ抽出エラー: {e}")
+            return None
+
+    # 4. save_to_csv メソッドの効率化
+    def save_to_csv(self, posts, filename=None, min_likes=0):
+        """
+        抽出した投稿をCSVファイルに保存する
+        
+        Args:
+            posts: 投稿データのリスト (username, post_text, likes, target)
+            filename: 保存先ファイル名
+            min_likes: 保存する最小いいね数
+            
+        Returns:
+            str: 保存したファイルパス、または失敗した場合はNone
+        """
+        if not posts:
+            logger.warning("保存する投稿がありません")
+            return None
+            
+        try:
+            # デフォルトのファイル名を設定
+            if not filename:
+                now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"data/threads_posts_{now}.csv"
+                
+            # ディレクトリが存在しない場合は作成
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            # 重複チェック用セットと保存用リストを初期化
+            seen_posts = set()
+            cleaned_posts = []
+                
+            for username, post_text, likes, target in posts:
+                # いいね数フィルタリング
+                if likes < min_likes:
+                    continue
+                    
+                # 重複チェック
+                post_identifier = f"{username}:{post_text[:20]}"
+                if post_identifier in seen_posts:
+                    continue
+                    
+                # ここでは_is_spam_postはすでに適用済みと仮定
+                    
+                # クリーニングしたデータを追加
+                cleaned_posts.append((username, post_text, likes, target))
+                seen_posts.add(post_identifier)
+                    
+            # データフレームに変換
+            df = pd.DataFrame(cleaned_posts, columns=["username", "post_text", "likes", "target"])
+            
+            # CSVに保存
+            df.to_csv(filename, index=False, encoding='utf-8-sig')
+            logger.info(f"{len(cleaned_posts)}件の投稿を {filename} に保存しました")
+            
+            return filename
+        
+        except Exception as e:
+            logger.error(f"CSVファイル保存エラー: {e}")
+            return None
 
 def get_accounts_from_env():
     """
