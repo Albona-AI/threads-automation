@@ -8,29 +8,49 @@ import openai
 from dotenv import load_dotenv
 from tqdm import tqdm
 from prompt_templates import ANALYSIS_PROMPT, TEMPLATE_PROMPT, FINAL_POST_PROMPT
+import concurrent.futures
+from functools import partial
 
 # .envファイルから環境変数をロード
 load_dotenv()
-
+        
 # APIキー設定
 openai.api_key = os.getenv("OPENAI_API_KEY")
-model = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+model = os.getenv("OPENAI_MODEL", "o1")
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def call_openai_api(messages, model="gpt-4-turbo"):
+# 並行処理の設定
+MAX_WORKERS = int(os.getenv("MAX_API_WORKERS", "5"))  # デフォルトは5つの並行ワーカー
+
+def call_openai_api(messages, custom_model=None):
     """
     OpenAI APIを呼び出す関数
     """
     try:
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=4000,
-            temperature=0.7
-        )
+        # グローバル変数のmodelを使用、またはカスタムモデルがあればそれを使用
+        use_model = custom_model if custom_model else model
+        
+        # o1モデルとその他のモデルで分岐
+        if "o1" in use_model:
+            # o1モデル用のパラメータ
+            response = openai.ChatCompletion.create(
+                model=use_model,
+                messages=messages,
+                max_completion_tokens=4000
+                # o1モデルはtemperatureをサポートしていない
+            )
+        else:
+            # 従来のモデル用のパラメータ
+            response = openai.ChatCompletion.create(
+                model=use_model,
+                messages=messages,
+                max_tokens=4000,
+                temperature=0.7
+            )
+        
         return response.choices[0].message["content"]
     except Exception as e:
         logger.error(f"OpenAI API呼び出しエラー: {e}")
@@ -122,6 +142,64 @@ def generate_final_post(template, target, post_username=""):
         logger.error(f"ターゲット '{target}' 向けの投稿生成に失敗しました")
         return None
 
+def _process_post(post, targets):
+    """
+    単一の投稿を処理するヘルパー関数
+    
+    Args:
+        post: (username, post_text, _) のタプル
+        targets: ターゲット名のリスト
+        
+    Returns:
+        list: (username, target, final_post) のタプルのリスト
+    """
+    username, post_text, _ = post
+    results = []
+    
+    # 投稿分析
+    analysis_result = analyze_post(post_text, username)
+    if not analysis_result:
+        logger.warning(f"Skipping post from {username} due to analysis failure")
+        return results
+    
+    # テンプレート作成
+    template_result = create_template(post_text, analysis_result, username)
+    if not template_result:
+        logger.warning(f"Skipping post from {username} due to template creation failure")
+        return results
+    
+    # 各ターゲット向けに並行して最終投稿を生成
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 部分関数を作成して投稿者名とテンプレートを固定
+        gen_post_for_target = partial(
+            _generate_post_for_target, 
+            template=template_result, 
+            username=username
+        )
+        
+        # 並行してターゲットごとの投稿を生成
+        for target, final_post in zip(targets, executor.map(gen_post_for_target, targets)):
+            if final_post:
+                results.append((username, target, final_post))
+            else:
+                logger.warning(f"Failed to generate post for {username} targeting {target}")
+    
+    return results
+
+def _generate_post_for_target(target, template, username):
+    """
+    特定のターゲット向けに投稿を生成するヘルパー関数
+    
+    Args:
+        target: ターゲット名
+        template: テンプレート
+        username: 投稿者名
+        
+    Returns:
+        str: 生成された投稿、または失敗した場合はNone
+    """
+    return generate_final_post(template, target, username)
+
 def process_posts(posts, targets):
     """
     収集した投稿を処理し、各ターゲット向けの最終投稿を生成する関数
@@ -137,26 +215,15 @@ def process_posts(posts, targets):
     
     logger.info(f"Processing {len(posts)} posts for {len(targets)} targets")
     
-    for username, post_text, _ in tqdm(posts, desc="Processing posts"):
-        # 投稿分析
-        analysis_result = analyze_post(post_text, username)
-        if not analysis_result:
-            logger.warning(f"Skipping post from {username} due to analysis failure")
-            continue
+    # 投稿ごとに並行して処理
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 部分関数を作成してターゲットリストを固定
+        process_single_post = partial(_process_post, targets=targets)
         
-        # テンプレート作成
-        template_result = create_template(post_text, analysis_result, username)
-        if not template_result:
-            logger.warning(f"Skipping post from {username} due to template creation failure")
-            continue
-        
-        # 各ターゲット向けに最終投稿を生成
-        for target in tqdm(targets, desc=f"Generating posts for {username}", leave=False):
-            final_post = generate_final_post(template_result, target, username)
-            if final_post:
-                final_posts.append((username, target, final_post))
-            else:
-                logger.warning(f"Failed to generate post for {username} targeting {target}")
+        # 進捗バーを表示しながら処理
+        results_iter = executor.map(process_single_post, posts)
+        for post_results in tqdm(results_iter, total=len(posts), desc="Processing posts"):
+            final_posts.extend(post_results)
     
     logger.info(f"Generated a total of {len(final_posts)} final posts")
-    return final_posts 
+    return final_posts
