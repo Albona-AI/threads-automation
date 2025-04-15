@@ -7,7 +7,7 @@ import logging
 import openai
 from dotenv import load_dotenv
 from tqdm import tqdm
-from prompt_templates import COMBINED_PROMPT, FINAL_POST_PROMPT
+from prompt_templates import ANALYTICS_PROMPT, TEMPLATE_PROMPT, FINAL_POST_PROMPT
 import concurrent.futures
 from functools import partial
 
@@ -36,15 +36,17 @@ def call_openai_api(messages, custom_model=None):
         # 使用するモデル名をログに出力
         logger.info(f"使用するOpenAIモデル: {use_model}")
         
-        # 新世代モデル（o1/o3など）と従来モデルで分岐
-        if "o1" in use_model or "o3" in use_model:
+        # 新世代モデルの識別
+        new_gen_models = ["o1", "o3", "gpt-4o", "gpt-4-1106-preview"]
+        is_new_gen = any(model_id in use_model for model_id in new_gen_models)
+        
+        if is_new_gen:
             # 新世代モデル用のパラメータ
             logger.info("新世代モデル用パラメータを使用: max_completion_tokens")
             response = openai.ChatCompletion.create(
                 model=use_model,
                 messages=messages,
                 max_completion_tokens=4000
-                # 新世代モデルはtemperatureをサポートしていない
             )
         else:
             # 従来のモデル用のパラメータ
@@ -61,47 +63,64 @@ def call_openai_api(messages, custom_model=None):
         logger.error(f"OpenAI API呼び出しエラー: {e}")
         return None
 
-def analyze_and_template_post(post_text, post_username=""):
+def analyze_post(post_text, post_username=""):
     """
-    投稿を分析しテンプレート化する関数（旧analyze_postとcreate_templateを統合）
+    投稿を分析する関数
     
     Args:
         post_text (str): 分析する投稿テキスト
-        post_username (str): 投稿者名
+        post_username (str): 投稿者名 (ログ出力用)
         
     Returns:
-        str: 分析結果とテンプレート化されたテキスト
-    """
-    logger.info(f"Analyzing and templating post from {post_username if post_username else 'anonymous'}")
-    
-    # プロンプトを作成
-    prompt = COMBINED_PROMPT.format(post_text=post_text)
-    
-    # OpenAI APIを呼び出す
-    combined_result = call_openai_api([{"role": "user", "content": prompt}])
-    
-    if combined_result:
-        logger.info("投稿分析・テンプレート化が完了しました")
-        return combined_result
-    else:
-        logger.error("投稿分析・テンプレート化に失敗しました")
-        return None
-
-def generate_final_post(template, target, username):
-    """
-    テンプレートとターゲットから最終的な投稿を生成する関数
-    
-    Args:
-        template: テンプレート
-        target: ターゲット名
-        username: 元の投稿者名
-        
-    Returns:
-        str: 生成された最終投稿
+        str: 分析結果テキスト、または失敗した場合はNone
     """
     try:
-        # ターゲットと投稿者名をログに記録
-        logger.info(f"Generating final post for target '{target}' based on {username}'s template")
+        logger.info(f"Analyzing post from {post_username}")
+        prompt = ANALYTICS_PROMPT.format(refers=post_text)
+        messages = [{"role": "user", "content": prompt}]
+        analysis = call_openai_api(messages)
+        if analysis:
+            logger.info(f"Analysis successful for post from {post_username}")
+        else:
+            logger.warning(f"Analysis failed for post from {post_username}")
+        return analysis
+    except Exception as e:
+        logger.error(f"Post analysis error for {post_username}: {e}")
+        return None
+
+def create_template(analysis, post_text, post_username=""):
+    """
+    分析結果を元に投稿テンプレートを作成する関数
+    
+    Args:
+        analysis (str): analyze_post で得られた分析結果
+        post_text (str): 元の投稿テキスト
+        post_username (str): 投稿者名 (ログ出力用)
+        
+    Returns:
+        str: テンプレート化されたテキスト、または失敗した場合はNone
+    """
+    try:
+        logger.info(f"Creating template based on analysis for {post_username}")
+        prompt = TEMPLATE_PROMPT.format(analysis=analysis, refers=post_text)
+        messages = [{"role": "user", "content": prompt}]
+        template = call_openai_api(messages)
+        if template:
+            logger.info(f"Template creation successful for {post_username}")
+        else:
+            logger.warning(f"Template creation failed for {post_username}")
+        return template
+    except Exception as e:
+        logger.error(f"Template creation error for {post_username}: {e}")
+        return None
+
+def generate_final_post(template, target, username=""):
+    """
+    テンプレートとターゲット情報に基づいて最終的な投稿を生成する関数
+    """
+    try:
+        # ログメッセージを修正 (テンプレートに基づいていることを明確化)
+        logger.info(f"Generating final post for target '{target}' based on template from {username}'s post")
         
         # フォーマットの前にデバッグロギングを追加
         logger.debug(f"Template data type: {type(template)}")
@@ -137,18 +156,24 @@ def _process_post(post, targets):
     username, post_text, _ = post
     results = []
     
-    # 投稿分析・テンプレート化（統合版）
-    combined_result = analyze_and_template_post(post_text, username)
-    if not combined_result:
-        logger.warning(f"Skipping post from {username} due to analysis/template failure")
+    # 1. 投稿分析
+    analysis = analyze_post(post_text, username)
+    if not analysis:
+        logger.warning(f"Skipping post from {username} due to analysis failure")
+        return results
+
+    # 2. テンプレート化
+    template = create_template(analysis, post_text, username)
+    if not template:
+        logger.warning(f"Skipping post from {username} due to template creation failure")
         return results
     
-    # 各ターゲット向けに並行して最終投稿を生成
+    # 3. 各ターゲット向けに並行して最終投稿を生成
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # 部分関数を作成して投稿者名とテンプレートを固定
         gen_post_for_target = partial(
             _generate_post_for_target, 
-            template=combined_result, 
+            template=template, # analyze_and_template_post の代わりに create_template の結果を使用
             username=username
         )
         
@@ -167,7 +192,7 @@ def _generate_post_for_target(target, template, username):
     
     Args:
         target: ターゲット名
-        template: テンプレート
+        template: テンプレート (create_template の結果)
         username: 投稿者名
         
     Returns:
