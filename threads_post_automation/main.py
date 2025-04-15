@@ -95,99 +95,80 @@ def read_posts_from_csv(csv_file):
         logger.error(f"CSVファイルの読み込みエラー: {e}")
         return []
 
-def save_final_posts_to_csv(final_posts, target_name):
+def save_final_posts_to_csv(final_posts_by_target, targets_config):
     """
-    最終投稿をCSVに保存する関数
+    すべてのターゲットの最終投稿を1つのCSVに保存する関数
     
     Args:
-        final_posts (list): (参考投稿名, ターゲット名, 完成した投稿本文) のタプルのリスト
-        target_name (str): ターゲット名
+        final_posts_by_target (dict): {ターゲット名: [(参考投稿名, ターゲット名, 完成した投稿本文), ...]} の辞書
+        targets_config (list): config.jsonから読み込んだターゲット設定リスト
         
     Returns:
         str: 保存したCSVファイルのパス
     """
-    if not final_posts:
+    # 全ターゲットの投稿件数を計算
+    total_posts = sum(len(posts) for posts in final_posts_by_target.values())
+    
+    if total_posts == 0:
         logger.warning("保存する最終投稿がありません")
         return None
     
-    # 日付ベースのフォルダ構造を作成
+    # 出力ディレクトリを作成
+    output_base_dir = "data/output-post"
+    os.makedirs(output_base_dir, exist_ok=True)
+    
+    # 日付を含むファイル名を生成
     now = datetime.datetime.now()
     date_str = now.strftime('%Y-%m-%d')
-    output_base_dir = "data/output-post"
-    
-    # ターゲット名と日付でフォルダを作成
-    target_date_dir = f"{output_base_dir}/{target_name}/{date_str}"
-    os.makedirs(target_date_dir, exist_ok=True)
-    
-    # 時間のみのタイムスタンプでファイル名を生成（より短く）
     time_str = now.strftime('%H%M%S')
-    csv_filename = f"{target_date_dir}/final_posts_{time_str}.csv"
+    csv_filename = f"{output_base_dir}/threads_posts_{date_str}_{time_str}.csv"
     
     try:
-        df = pd.DataFrame(final_posts, columns=["reference_post", "target", "final_post"])
+        # 新しいフォーマットのデータを準備
+        new_data = []
+        
+        # 現在時刻を基準に60分刻みの投稿時間を作成
+        base_time = now
+        hour_counter = 0
+        
+        # すべてのターゲットの投稿を処理
+        for target_name, posts in final_posts_by_target.items():
+            # 現在のターゲット設定を取得
+            target_config = next((t for t in targets_config if t.get('name') == target_name), None)
+            
+            if not target_config:
+                logger.warning(f"ターゲット '{target_name}' の設定情報が見つかりません。スキップします。")
+                continue
+            
+            # このターゲットのすべての投稿を処理
+            for ref, tgt, post_content in posts:
+                # 投稿時間を計算（60分=1時間刻み）
+                scheduled_time = base_time + datetime.timedelta(hours=hour_counter)
+                scheduled_time_str = scheduled_time.strftime('%Y-%m-%dT%H:%M:%S')
+                hour_counter += 1
+                
+                # 各行のデータを作成
+                row_data = {
+                    'username': target_config.get('username', ''),
+                    'content': post_content,
+                    'image': '',  # 空白
+                    'replyContent': target_config.get('replyContent', ''),
+                    'replyImage': target_config.get('replyImage', ''),
+                    'scheduledTime': scheduled_time_str
+                }
+                
+                new_data.append(row_data)
+        
+        # DataFrameに変換してCSV保存
+        df = pd.DataFrame(new_data)
         df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-        logger.info(f"{len(final_posts)} 件の最終投稿を {csv_filename} に保存しました")
+        logger.info(f"{total_posts} 件の最終投稿を {csv_filename} に保存しました")
         return csv_filename
     
     except Exception as e:
         logger.error(f"最終投稿のCSV保存エラー: {e}")
+        logger.error(traceback.format_exc())
         return None
-
-def create_latest_symlink(csv_filename, target_name):
-    """
-    最新のCSVファイルへのシンボリックリンクを作成する
-    """
-    output_dir = "data/output-post"
-    latest_link = f"{output_dir}/latest_{target_name}.csv"
-    
-    # 既存のシンボリックリンクまたはファイルがあれば削除
-    if os.path.exists(latest_link) or os.path.islink(latest_link):
-        try:
-            if os.path.islink(latest_link):
-                os.unlink(latest_link)
-            else:
-                os.remove(latest_link)
-        except Exception as e:
-            logger.warning(f"既存のリンク/ファイルの削除に失敗しました: {e}")
-    
-    # 絶対パスを取得
-    abs_csv_filename = os.path.abspath(csv_filename)
-    
-    # シンボリックリンク作成を試み、失敗したらコピーを作成
-    try:
-        os.symlink(abs_csv_filename, latest_link)
-        logger.info(f"最新ファイルへのシンボリックリンクを作成しました: {latest_link}")
-    except Exception as e:
-        logger.warning(f"シンボリックリンク作成に失敗しました。ファイルをコピーします: {e}")
-        os.makedirs(os.path.dirname(latest_link), exist_ok=True)
-        try:
-            shutil.copy2(csv_filename, latest_link)
-            logger.info(f"最新ファイルのコピーを作成しました: {latest_link}")
-        except Exception as e:
-            logger.error(f"ファイルコピーにも失敗しました: {e}")
-
-def limit_csv_files_per_target(target_name, max_files=10):
-    """
-    ターゲットごとに保持するCSVファイルの数を制限する
-    """
-    target_dir = f"data/output-post/{target_name}"
-    if not os.path.exists(target_dir):
-        return
-    
-    # 日付ごとのフォルダをリストアップし、古い順にソート
-    date_dirs = sorted([d for d in os.listdir(target_dir) 
-                       if os.path.isdir(os.path.join(target_dir, d))])
-    
-    # 日付ディレクトリが多すぎる場合、古い日付から削除
-    if len(date_dirs) <= max_files:
-        return
-        
-    # 削除が必要な数を計算して、その数だけ古いディレクトリを削除
-    dirs_to_remove = date_dirs[:len(date_dirs) - max_files]
-    for old_dir in dirs_to_remove:
-        old_path = os.path.join(target_dir, old_dir)
-        shutil.rmtree(old_path)
-        logger.info(f"古いデータディレクトリを削除しました: {old_path}")
 
 def process_target(target):
     """
@@ -313,16 +294,16 @@ def process_target(target):
 
 def process_csv_file(csv_file, targets):
     """
-    CSVファイルから投稿を読み込み処理する関数
+    CSVファイルから投稿を読み込み処理する関数 - 統合版
     """
     logger.info(f"指定されたCSVファイル {csv_file} から投稿を読み込みます")
     posts = read_posts_from_csv(csv_file)
     
     if not posts:
         logger.error("処理対象の投稿がありません")
-        return None
+        return []
     
-    # すべてのターゲット向けに処理
+    # ターゲット名のリストを準備
     target_names = [target["name"] for target in targets]
     logger.info(f"投稿処理フェーズを開始します（ターゲット: {', '.join(target_names)}）")
     
@@ -331,23 +312,23 @@ def process_csv_file(csv_file, targets):
     
     if not final_posts:
         logger.error("ChatGPTによる投稿処理が失敗しました")
-        return None
+        return []
     
-    # 全ターゲットをまとめて保存
-    result_file = save_final_posts_to_csv(final_posts, "all_targets")
+    # ターゲットごとに分類するための辞書を作成
+    final_posts_by_target = {}
+    for ref, tgt, post in final_posts:
+        if tgt not in final_posts_by_target:
+            final_posts_by_target[tgt] = []
+        final_posts_by_target[tgt].append((ref, tgt, post))
     
-    # 最新ファイルへのシンボリックリンクを作成
-    if result_file:
-        create_latest_symlink(result_file, "all_targets")
-        
-        # 古いファイルのクリーンアップ
-        limit_csv_files_per_target("all_targets")
+    # すべてのターゲットの結果を1つのファイルにまとめて保存
+    result_file = save_final_posts_to_csv(final_posts_by_target, targets)
     
-    return result_file if result_file else None
+    return [result_file] if result_file else []
 
 def main():
     """
-    メイン処理フロー
+    メイン処理フロー - 統合出力バージョン
     """
     # .envファイルから環境変数をロード
     load_dotenv()
@@ -366,22 +347,35 @@ def main():
     # コマンドライン引数からCSVファイルを読み込むかどうかを判断
     if len(sys.argv) > 1 and sys.argv[1].endswith('.csv'):
         logger.info(f"コマンドライン引数から指定されたCSVファイル {sys.argv[1]} を処理します")
-        result_file = process_csv_file(sys.argv[1], targets)
-        if result_file:
-            results.append(result_file)
+        result_files = process_csv_file(sys.argv[1], targets)
+        results.extend(result_files)
     else:
-        # ターゲットごとに処理を実行
+        # 全ターゲットのスクレイピング結果をまとめる
+        all_scraped_posts = []
+        all_target_configs = []
+        
         for target in targets:
+            # スクレイピング結果のファイル
             result_file = process_target(target)
             if result_file:
-                logger.info(f"スクレイピング結果をChatGPTで処理します: {result_file}")
-                processed_file = process_csv_file(result_file, [target])
-                if processed_file:
-                    results.append(processed_file)
-                    # 最新ファイルへのシンボリックリンクを作成
-                    create_latest_symlink(processed_file, target["name"])
-                    # 古いファイルのクリーンアップ
-                    limit_csv_files_per_target(target["name"])
+                logger.info(f"スクレイピング結果を追加: {result_file}")
+                scraped_posts = read_posts_from_csv(result_file)
+                all_scraped_posts.extend(scraped_posts)
+                all_target_configs.append(target)
+        
+        # すべてのスクレイピング結果を一度に処理
+        if all_scraped_posts:
+            # 一時的なCSVファイルに保存
+            temp_dir = "data/temp"
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_csv = f"{temp_dir}/combined_scraped_posts.csv"
+            
+            df = pd.DataFrame(all_scraped_posts, columns=["username", "post_text", "likes"])
+            df.to_csv(temp_csv, index=False, encoding='utf-8-sig')
+            
+            # 統合ファイルを処理
+            result_files = process_csv_file(temp_csv, all_target_configs)
+            results.extend(result_files)
     
     # 最終結果の報告
     if results:
