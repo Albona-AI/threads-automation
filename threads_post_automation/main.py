@@ -20,267 +20,322 @@ import traceback
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def ensure_directories():
-    """
-    必要なディレクトリ構造を作成する関数
-    """
-    directories = ["data", "data/output-post", "data/raw"]
-    for directory in directories:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            logger.info(f"ディレクトリを作成しました: {directory}")
-    return True
-
-def get_targets_from_config(config_file="config.json"):
-    """
-    設定ファイルからターゲット情報を読み込む関数
-    
-    Args:
-        config_file (str): 設定ファイルのパス
-    
-    Returns:
-        list: ターゲット情報のリスト
-    """
+# 設定ファイルの読み込み
+def load_config(config_path="config.json"):
+    """設定ファイルを読み込む関数"""
     try:
-        if not os.path.exists(config_file):
-            logger.error(f"設定ファイル {config_file} が見つかりません")
-            return []
-        
-        with open(config_file, "r", encoding="utf-8") as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
-        
-        targets = config.get("targets", [])
-        
-        if not targets:
-            logger.warning("設定ファイルにターゲット情報がありません")
-        else:
-            logger.info(f"{len(targets)} 件のターゲットを読み込みました")
-        
-        return targets
-    
+        return config
     except Exception as e:
-        logger.error(f"設定ファイル読み込みエラー: {e}")
-        return []
+        logger.error(f"設定ファイルの読み込みに失敗しました: {e}")
+        return None
 
 def read_posts_from_csv(csv_file):
-    """
-    CSVファイルから投稿を読み込む関数
-    
-    Args:
-        csv_file (str): CSVファイルのパス
-        
-    Returns:
-        list: (username, post_text, likes) のタプルのリスト
-    """
+    """CSVファイルから投稿を読み込む関数"""
     try:
         df = pd.read_csv(csv_file, encoding='utf-8-sig')
-        
-        # 必要なカラムが存在するか確認
-        required_columns = ["username", "post_text"]
-        for col in required_columns:
-            if col not in df.columns:
-                logger.error(f"必要なカラム '{col}' がCSVファイルに存在しません")
-                return []
-        
-        # likesカラムが存在しない場合は0を設定
-        if "likes" not in df.columns:
-            df["likes"] = 0
-        
-        # タプルのリストに変換
-        posts = list(zip(df["username"], df["post_text"], df["likes"]))
+        posts = []
+        for _, row in df.iterrows():
+            if 'username' in row and 'post_text' in row and 'likes' in row:
+                posts.append((row['username'], row['post_text'], row.get('likes', 0)))
         logger.info(f"{len(posts)} 件の投稿を読み込みました")
         return posts
-    
     except Exception as e:
-        logger.error(f"CSVファイルの読み込みエラー: {e}")
+        logger.error(f"CSVファイルの読み込みに失敗しました: {e}")
+        logger.error(traceback.format_exc())
         return []
 
-def save_final_posts_to_csv(final_posts_by_target, targets_config):
+def save_final_posts_by_account(generated_posts, accounts, targets_dict):
     """
-    すべてのターゲットの最終投稿を1つのCSVに保存する関数
+    アカウントごとに投稿を振り分けて保存する関数
     
     Args:
-        final_posts_by_target (dict): {ターゲット名: [(参考投稿名, ターゲット名, 完成した投稿本文), ...]} の辞書
-        targets_config (list): config.jsonから読み込んだターゲット設定リスト
+        generated_posts (dict): {ターゲット名: [(参考投稿名, ターゲット名, 完成した投稿本文), ...]} の辞書
+        accounts (list): アカウント設定のリスト
+        targets_dict (dict): ターゲット設定の辞書
         
     Returns:
-        str: 保存したCSVファイルのパス
+        list: 保存したCSVファイルのパスのリスト
     """
-    # 全ターゲットの投稿件数を計算
-    total_posts = sum(len(posts) for posts in final_posts_by_target.values())
-    
-    if total_posts == 0:
+    if not generated_posts:
         logger.warning("保存する最終投稿がありません")
-        return None
+        return []
     
     # 出力ディレクトリを作成
     output_base_dir = "data/output-post"
     os.makedirs(output_base_dir, exist_ok=True)
     
-    # 日付を含むファイル名を生成
+    # 日付と時刻を含むプレフィックスを生成
     now = datetime.datetime.now()
     date_str = now.strftime('%Y-%m-%d')
     time_str = now.strftime('%H%M%S')
-    csv_filename = f"{output_base_dir}/threads_posts_{date_str}_{time_str}.csv"
     
-    try:
-        # 新しいフォーマットのデータを準備
-        new_data = []
+    saved_files = []
+    
+    # ターゲットごとのアカウントリストを作成
+    accounts_by_target = {}
+    for account in accounts:
+        target = account.get('target')
+        if target not in accounts_by_target:
+            accounts_by_target[target] = []
+        accounts_by_target[target].append(account)
+    
+    # ターゲットごとに投稿を処理
+    for target_name, target_posts in generated_posts.items():
+        if not target_posts:
+            logger.warning(f"ターゲット '{target_name}' には保存する投稿がありません")
+            continue
         
-        # 現在時刻を基準に60分刻みの投稿時間を作成
-        base_time = now
-        hour_counter = 0
+        # このターゲットのアカウントを取得
+        target_accounts = accounts_by_target.get(target_name, [])
+        if not target_accounts:
+            logger.warning(f"ターゲット '{target_name}' に対応するアカウントがありません")
+            continue
         
-        # すべてのターゲットの投稿を処理
-        for target_name, posts in final_posts_by_target.items():
-            # 現在のターゲット設定を取得
-            target_config = next((t for t in targets_config if t.get('name') == target_name), None)
+        # このターゲットの設定を取得
+        target_config = targets_dict.get(target_name)
+        if not target_config:
+            logger.warning(f"ターゲット '{target_name}' の設定情報が見つかりません")
+            continue
+        
+        # 各アカウントへの投稿割り当て数を計算
+        max_posts_per_keyword = target_config.get('max_posts_per_keyword', 5)
+        
+        # 投稿をアカウントに分配
+        posts_for_accounts = {}
+        total_posts = len(target_posts)
+        
+        # 各アカウントに振り分ける投稿数 (均等に割り振る)
+        posts_per_account = total_posts // len(target_accounts)
+        if posts_per_account == 0 and total_posts > 0:
+            posts_per_account = 1  # 最低1投稿は割り当てる
+        
+        # 投稿をシャッフルして、アカウント間で偏りが出ないようにする
+        shuffled_posts = random.sample(target_posts, len(target_posts))
+        
+        # 各アカウントに投稿を均等に割り振る
+        for i, account in enumerate(target_accounts):
+            username = account.get('username')
+            start_idx = i * posts_per_account
+            end_idx = min(start_idx + posts_per_account, total_posts)
             
-            if not target_config:
-                logger.warning(f"ターゲット '{target_name}' の設定情報が見つかりません。スキップします。")
+            if start_idx < total_posts:
+                posts_for_accounts[username] = shuffled_posts[start_idx:end_idx]
+            else:
+                posts_for_accounts[username] = []
+        
+        # 残りの投稿をランダムに割り当て
+        remaining_posts = shuffled_posts[len(target_accounts) * posts_per_account:]
+        account_usernames = [account.get('username') for account in target_accounts]
+        
+        for post in remaining_posts:
+            random_username = random.choice(account_usernames)
+            posts_for_accounts[random_username].append(post)
+        
+        # 各アカウントに投稿を保存
+        for account in target_accounts:
+            username = account.get('username')
+            account_posts = posts_for_accounts.get(username, [])
+            
+            if not account_posts:
+                logger.warning(f"アカウント '{username}' には割り当てる投稿がありません")
                 continue
             
-            # このターゲットのすべての投稿を処理
-            for ref, tgt, post_content in posts:
-                # 投稿時間を計算（60分=1時間刻み）
-                scheduled_time = base_time + datetime.timedelta(hours=hour_counter)
-                scheduled_time_str = scheduled_time.strftime('%Y-%m-%dT%H:%M:%S')
-                hour_counter += 1
+            # ユーザー名を使用したファイル名を生成
+            username_filename = f"{output_base_dir}/threads_posts_{username}_{date_str}_{time_str}.csv"
+            
+            try:
+                # 新しいフォーマットのデータを準備
+                new_data = []
                 
-                # 各行のデータを作成
-                row_data = {
-                    'username': target_config.get('username', ''),
-                    'content': post_content,
-                    'image': '',  # 空白
-                    'replyContent': target_config.get('replyContent', ''),
-                    'replyImage': target_config.get('replyImage', ''),
-                    'scheduledTime': scheduled_time_str
-                }
+                # 現在時刻を基準に15分刻みの投稿時間を作成
+                base_time = now
+                hour_counter = 0
                 
-                new_data.append(row_data)
+                # このアカウントのすべての投稿を処理
+                for ref, tgt, post_content in account_posts:
+                    # 投稿時間を計算（15分刻み）
+                    scheduled_time = base_time + datetime.timedelta(minutes=hour_counter * 15)
+                    scheduled_time_str = scheduled_time.strftime('%Y-%m-%dT%H:%M:%S')
+                    hour_counter += 1
+                    
+                    # 各行のデータを作成
+                    row_data = {
+                        'username': username,
+                        'content': post_content,
+                        'image': '',  # 空白
+                        'replyContent': account.get('replyContent', ''),
+                        'replyImage': account.get('replyImage', ''),
+                        'scheduledTime': scheduled_time_str
+                    }
+                    
+                    new_data.append(row_data)
+                
+                # DataFrameに変換してCSV保存
+                df = pd.DataFrame(new_data)
+                df.to_csv(username_filename, index=False, encoding='utf-8-sig')
+                logger.info(f"アカウント '{username}' の {len(account_posts)} 件の投稿を {username_filename} に保存しました")
+                saved_files.append(username_filename)
+                
+            except Exception as e:
+                logger.error(f"アカウント '{username}' の投稿保存中にエラーが発生しました: {e}")
+                logger.error(traceback.format_exc())
+    
+    if not saved_files:
+        logger.warning("どのアカウントの投稿も保存されませんでした")
+    else:
+        logger.info(f"{len(saved_files)} 個のアカウント用CSVファイルを保存しました")
+    
+    return saved_files
+
+def process_csv_file(csv_file, config):
+    """
+    CSVファイルから投稿を読み込み処理する関数
+    
+    Args:
+        csv_file (str): CSVファイルのパス
+        config (dict): 設定情報
         
-        # DataFrameに変換してCSV保存
-        df = pd.DataFrame(new_data)
-        df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-        logger.info(f"{total_posts} 件の最終投稿を {csv_filename} に保存しました")
-        return csv_filename
+    Returns:
+        list: 保存したCSVファイルのパスのリスト
+    """
+    try:
+        logger.info(f"CSVファイル {csv_file} からの投稿処理を開始します")
+        posts = read_posts_from_csv(csv_file)
+        
+        if not posts:
+            logger.error("処理対象の投稿がありません")
+            return []
+        
+        # ターゲットとアカウントの情報を取得
+        targets = config.get('targets', [])
+        accounts = config.get('accounts', [])
+        
+        # ターゲット名のリストを準備
+        target_names = [target["target"] for target in targets]
+        target_dict = {target["target"]: target for target in targets}
+        
+        logger.info(f"投稿処理フェーズを開始します（ターゲット: {', '.join(target_names)}）")
+        
+        # ChatGPT処理を実行
+        final_posts = process_posts(posts, target_names)
+        
+        if not final_posts:
+            logger.error("ChatGPTによる投稿処理が失敗しました")
+            return []
+        
+        # ターゲットごとに分類するための辞書を作成
+        final_posts_by_target = {}
+        for ref, tgt, post in final_posts:
+            if tgt not in final_posts_by_target:
+                final_posts_by_target[tgt] = []
+            final_posts_by_target[tgt].append((ref, tgt, post))
+        
+        # ターゲットごとに個別のファイルに保存
+        result_files = save_final_posts_by_account(final_posts_by_target, accounts, target_dict)
+        
+        return result_files
     
     except Exception as e:
-        logger.error(f"最終投稿のCSV保存エラー: {e}")
+        logger.error(f"CSV処理中にエラーが発生しました: {e}")
         logger.error(traceback.format_exc())
-        return None
+        return []
 
-def process_target(target):
+def run_threads_scraper(config):
     """
-    特定のターゲットに対する処理を実行する関数
+    スクレイピングを実行する関数
+    
+    Args:
+        config (dict): 設定情報の辞書
+        
+    Returns:
+        str: 保存したCSVファイルのパス、または失敗時はNone
     """
-    target_name = target["name"]
-    keywords = target.get("keywords", [])
-    min_likes = target.get("min_likes", 300)  # 設定ファイルからいいね数閾値を取得（デフォルト300）
-    
-    # 投稿数の設定を取得
-    max_posts_per_keyword = target.get("max_posts_per_keyword", 30)  # デフォルト30件
-    max_posts_total = target.get("max_posts_total", 100)  # デフォルト合計100件
-
-    logger.info(f"ターゲット '{target_name}' の処理を開始します (最小いいね数: {min_likes}, キーワードあたり最大: {max_posts_per_keyword}件, 合計最大: {max_posts_total}件)")
-    
-    # .envファイルからログイン情報を取得
-    username = os.getenv("THREADS_USERNAME")
-    password = os.getenv("THREADS_PASSWORD")
-    
-    if not username or not password:
-        logger.error("環境変数にThreadsのログイン情報が設定されていません")
-        return None
-    
-    # ヘッドレスモードかどうかを環境変数から取得
-    headless = os.getenv("HEADLESS_BROWSER", "True").lower() == "true"
-    logger.info(f"{'ヘッドレス' if headless else '表示'} モードでスクレイピングを実行します")
-    
-    # 通常モードでスクレイピングを実行
-    scraper = ThreadsScraper(headless=headless)
-    
     try:
-        # ログイン処理を実行
-        if not scraper.login(username, password):
-            logger.error("Threadsへのログインに失敗しました。処理を中止します。")
+        # ターゲットとアカウント設定を取得
+        targets = config.get('targets', [])
+        accounts = config.get('accounts', [])
+        
+        # ターゲットごとのアカウント数をカウント
+        accounts_per_target = {}
+        for account in accounts:
+            target = account.get('target')
+            if target not in accounts_per_target:
+                accounts_per_target[target] = 0
+            accounts_per_target[target] += 1
+        
+        # ターゲットごとに処理
+        all_scraped_posts = []
+        
+        # スクレイパーの初期化
+        scraper = ThreadsScraper(headless=False)
+        
+        # 環境変数からログイン情報を取得
+        username = os.getenv("THREADS_USERNAME")
+        password = os.getenv("THREADS_PASSWORD")
+        
+        if not username or not password:
+            logger.error("環境変数にログイン情報が設定されていません。")
             return None
         
-        # 日付ディレクトリを作成
-        now = datetime.datetime.now()
-        date_str = now.strftime('%Y-%m-%d')
-        raw_data_dir = f"data/raw/{target_name}/{date_str}"
-        os.makedirs(raw_data_dir, exist_ok=True)
-        
-        # 時刻を含むファイル名を設定
-        time_str = now.strftime('%H%M%S')
-        csv_file = f"{raw_data_dir}/{target_name}_{time_str}.csv"
-        
-        posts = []
-        
-        # キーワードがある場合はキーワード検索を実行
-        if keywords:
-            logger.info(f"キーワードリスト {keywords} のスクレイピングを実行します")
+        # ログイン処理を明示的に呼び出す - ユーザー名とパスワードを渡す
+        login_success = scraper.login(username, password)
+        if not login_success:
+            logger.error("Threadsへのログインに失敗しました。")
+            return None
             
+        output_dir = "data/scraped"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        for target in targets:
+            target_name = target.get('target')
+            keywords = target.get('keywords', [])
+            min_likes = target.get('min_likes', 500)
+            max_posts_per_keyword = target.get('max_posts_per_keyword', 5)
+            
+            # このターゲットのアカウント数
+            num_accounts = accounts_per_target.get(target_name, 0)
+            if num_accounts == 0:
+                logger.warning(f"ターゲット '{target_name}' に対応するアカウントがありません。スキップします。")
+                continue
+            
+            # 希望する処理: キーワードごとに「アカウント数 × max_posts_per_keyword」の投稿を取得
+            posts_per_keyword = num_accounts * max_posts_per_keyword
+            
+            logger.info(f"ターゲット '{target_name}' のスクレイピングを開始します。必要投稿数: {posts_per_keyword * len(keywords)}")
+            
+            # キーワードごとにスクレイピング
             for keyword in keywords:
-                logger.info(f"キーワード '{keyword}' の投稿を取得します")
-                keyword_posts = scraper.extract_posts_from_search(
-                    keyword=keyword,
-                    max_posts=max_posts_per_keyword,  # 設定ファイルの値を使用
-                    exclude_image_posts=True,
-                    min_likes=min_likes,
-                    target=target_name
-                )
+                logger.info(f"キーワード '{keyword}' のスクレイピングを開始します (1キーワードあたり {posts_per_keyword} 件)")
                 
-                if keyword_posts:
-                    logger.info(f"キーワード '{keyword}' から {len(keyword_posts)} 件の投稿を取得しました")
-                    posts.extend(keyword_posts)
-                else:
-                    logger.warning(f"キーワード '{keyword}' からは投稿を取得できませんでした")
+                # キーワード検索結果を取得
+                posts = scraper.search_keyword(keyword, max_posts=posts_per_keyword, min_likes=min_likes)
                 
-                # 連続アクセスを避けるため少し待機
-                time.sleep(random.uniform(2.0, 5.0))
-        else:
-            # 通常のスクレイピング
-            posts = scraper.extract_posts(
-                max_posts=max_posts_total,  # 設定ファイルの値を使用
-                exclude_image_posts=True,
-                min_likes=min_likes
-            )
+                # 結果を追加
+                for post in posts:
+                    # (username, post_text, likes)の形式でall_scraped_postsに追加
+                    all_scraped_posts.append((post[0], post[1], post[2]))
+                
+                logger.info(f"キーワード '{keyword}' で {len(posts)} 件の投稿を取得しました")
+                
+                # ランダムな休憩時間
+                time.sleep(random.uniform(3, 7))
         
-        # 重複排除処理
-        unique_posts = []
-        seen_posts = set()
+        # クッキー保存
+        scraper.save_cookies()
         
-        for post in posts:
-            # ユーザー名と投稿先頭部分で一意性を判断
-            post_id = f"{post[0]}:{post[1][:50]}"
-            if post_id not in seen_posts:
-                unique_posts.append(post)
-                seen_posts.add(post_id)
-        
-        # 最大件数を制限
-        if len(unique_posts) > max_posts_total:
-            logger.info(f"投稿数が上限を超えているため、{max_posts_total}件に制限します ({len(unique_posts)}件 → {max_posts_total}件)")
-            unique_posts = unique_posts[:max_posts_total]
-        
-        logger.info(f"重複排除後: {len(unique_posts)}/{len(posts)} 件の投稿を取得しました")
-        
-        # 取得した投稿をCSVに保存
-        if unique_posts:
-            csv_file = scraper.save_to_csv(
-                posts=unique_posts,
-                filename=csv_file,
-                min_likes=min_likes
-            )
+        # 結果をCSVに保存
+        if all_scraped_posts:
+            temp_csv = f"{output_dir}/all_scraped_posts.csv"
+            df = pd.DataFrame(all_scraped_posts, columns=["username", "post_text", "likes"])
+            df.to_csv(temp_csv, index=False, encoding='utf-8-sig')
+            logger.info(f"合計 {len(all_scraped_posts)} 件の投稿を {temp_csv} に保存しました")
             
-            if csv_file:
-                logger.info(f"ターゲット '{target_name}' 向けの {len(unique_posts)} 件の投稿を {csv_file} に保存しました")
-                return csv_file
-            else:
-                logger.error(f"投稿のCSV保存に失敗しました")
-                return None
+            # 結果を返す
+            return temp_csv
         else:
-            logger.warning(f"投稿が取得できませんでした")
+            logger.warning("スクレイピングの結果、投稿が見つかりませんでした")
             return None
     
     except Exception as e:
@@ -289,101 +344,55 @@ def process_target(target):
         return None
     
     finally:
-        # スクレイパーを閉じる
+        # スクレイパーを終了
         scraper.close()
 
-def process_csv_file(csv_file, targets):
-    """
-    CSVファイルから投稿を読み込み処理する関数 - 統合版
-    """
-    logger.info(f"指定されたCSVファイル {csv_file} から投稿を読み込みます")
-    posts = read_posts_from_csv(csv_file)
-    
-    if not posts:
-        logger.error("処理対象の投稿がありません")
-        return []
-    
-    # ターゲット名のリストを準備
-    target_names = [target["name"] for target in targets]
-    logger.info(f"投稿処理フェーズを開始します（ターゲット: {', '.join(target_names)}）")
-    
-    # ChatGPT処理を実行
-    final_posts = process_posts(posts, target_names)
-    
-    if not final_posts:
-        logger.error("ChatGPTによる投稿処理が失敗しました")
-        return []
-    
-    # ターゲットごとに分類するための辞書を作成
-    final_posts_by_target = {}
-    for ref, tgt, post in final_posts:
-        if tgt not in final_posts_by_target:
-            final_posts_by_target[tgt] = []
-        final_posts_by_target[tgt].append((ref, tgt, post))
-    
-    # すべてのターゲットの結果を1つのファイルにまとめて保存
-    result_file = save_final_posts_to_csv(final_posts_by_target, targets)
-    
-    return [result_file] if result_file else []
-
 def main():
-    """
-    メイン処理フロー - 統合出力バージョン
-    """
-    # .envファイルから環境変数をロード
-    load_dotenv()
-    
-    # 必要なディレクトリ構造を確保
-    ensure_directories()
-    
-    # ターゲットリストを取得
-    targets = get_targets_from_config()
-    if not targets:
-        logger.error("処理対象のターゲットがありません。設定ファイルを確認してください。")
-        return
-    
-    results = []
-    
-    # コマンドライン引数からCSVファイルを読み込むかどうかを判断
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.csv'):
-        logger.info(f"コマンドライン引数から指定されたCSVファイル {sys.argv[1]} を処理します")
-        result_files = process_csv_file(sys.argv[1], targets)
-        results.extend(result_files)
-    else:
-        # 全ターゲットのスクレイピング結果をまとめる
-        all_scraped_posts = []
-        all_target_configs = []
+    """メイン実行関数"""
+    try:
+        # 環境変数の読み込み
+        load_dotenv()
         
-        for target in targets:
-            # スクレイピング結果のファイル
-            result_file = process_target(target)
-            if result_file:
-                logger.info(f"スクレイピング結果を追加: {result_file}")
-                scraped_posts = read_posts_from_csv(result_file)
-                all_scraped_posts.extend(scraped_posts)
-                all_target_configs.append(target)
+        # 設定ファイルの読み込み
+        config = load_config()
+        if not config:
+            logger.error("設定ファイルの読み込みに失敗しました。処理を中止します。")
+            sys.exit(1)
         
-        # すべてのスクレイピング結果を一度に処理
-        if all_scraped_posts:
-            # 一時的なCSVファイルに保存
-            temp_dir = "data/temp"
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_csv = f"{temp_dir}/combined_scraped_posts.csv"
+        # ターゲットとアカウントの情報を取得
+        targets = config.get('targets', [])
+        accounts = config.get('accounts', [])
+        
+        if not targets:
+            logger.error("ターゲットの設定がありません。処理を中止します。")
+            sys.exit(1)
+        
+        if not accounts:
+            logger.error("アカウントの設定がありません。処理を中止します。")
+            sys.exit(1)
+        
+        logger.info(f"{len(targets)} 個のターゲットと {len(accounts)} 個のアカウントが読み込まれました")
+        
+        # スクレイピング実行
+        csv_file = run_threads_scraper(config)
+        
+        # 投稿生成と保存
+        if csv_file:
+            result_files = process_csv_file(csv_file, config)
             
-            df = pd.DataFrame(all_scraped_posts, columns=["username", "post_text", "likes"])
-            df.to_csv(temp_csv, index=False, encoding='utf-8-sig')
-            
-            # 統合ファイルを処理
-            result_files = process_csv_file(temp_csv, all_target_configs)
-            results.extend(result_files)
+            # 最終結果の報告
+            if result_files:
+                logger.info(f"全ての処理が完了しました。結果は以下のファイルに保存されています：")
+                for file in result_files:
+                    logger.info(f"- {file}")
+            else:
+                logger.error("処理は完了しましたが、結果の保存に失敗しました。")
+        else:
+            logger.error("スクレイピングに失敗したため、投稿生成を行いませんでした。")
     
-    # 最終結果の報告
-    if results:
-        logger.info(f"全ての処理が完了しました。結果は以下のファイルに保存されています：")
-        for file in results:
-            logger.info(f"- {file}")
-    else:
-        logger.error("処理は完了しましたが、結果の保存に失敗しました。")
+    except Exception as e:
+        logger.error(f"実行中にエラーが発生しました: {e}")
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     main() 

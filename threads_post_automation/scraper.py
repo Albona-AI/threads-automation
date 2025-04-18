@@ -2142,6 +2142,32 @@ class ThreadsScraper:
             logger.error(f"CSVファイル保存エラー: {e}")
             return None
 
+    def search_keyword(self, keyword, max_posts=10, min_likes=500):
+        """
+        キーワードで検索して投稿を取得するためのラッパーメソッド
+        
+        Args:
+            keyword (str): 検索キーワード
+            max_posts (int): 取得する最大投稿数
+            min_likes (int): 最小いいね数
+            
+        Returns:
+            list: (username, post_text, likes) のタプルのリスト
+        """
+        logger.info(f"Searching for keyword: {keyword} (max: {max_posts}, min likes: {min_likes})")
+        
+        posts = self.extract_posts_from_search(
+            keyword=keyword,
+            max_posts=max_posts,
+            exclude_image_posts=True,
+            min_likes=min_likes,
+            target=""  # 空文字列を渡す（既存のAPIとの互換性のため）
+        )
+        
+        logger.info(f"Found {len(posts)} posts for keyword: {keyword}")
+        
+        return posts
+
 def get_accounts_from_env():
     """
     .env ファイルから複数のアカウント情報を取得
